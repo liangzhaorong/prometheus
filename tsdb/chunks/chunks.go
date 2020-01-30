@@ -53,21 +53,23 @@ const (
 	ChunkEncodingSize = 1
 )
 
+// Meta 存储 Chunk 实例关联的元数据信息
 // Meta holds information about a chunk of data.
 type Meta struct {
 	// Ref and Chunk hold either a reference that can be used to retrieve
 	// chunk data or the data itself.
 	// When it is a reference it is the segment offset at which the chunk bytes start.
 	// Generally, only one of them is set.
-	Ref   uint64
-	Chunk chunkenc.Chunk
+	Ref   uint64         // 记录关联 Chunk 在磁盘上的位置信息, 主要用于读取
+	Chunk chunkenc.Chunk // 指向 XORChunk 实例, 在 ChunkWriter 方法中, 在将 Chunk 中时序数据持久化到文件时, 该字段必须有值
 
 	// Time range the data covers.
 	// When MaxTime == math.MaxInt64 the chunk is still open and being appended to.
-	MinTime, MaxTime int64
+	MinTime, MaxTime int64 // 记录 Chunk 实例所覆盖的时间范围
 }
 
 // writeHash writes the chunk encoding and raw data into the provided hash.
+// writeHash 为关联的 Chunk 计算 Hash 值
 func (cm *Meta) writeHash(h hash.Hash, buf []byte) error {
 	buf = append(buf[:0], byte(cm.Chunk.Encoding()))
 	if _, err := h.Write(buf[:1]); err != nil {
@@ -80,6 +82,7 @@ func (cm *Meta) writeHash(h hash.Hash, buf []byte) error {
 }
 
 // OverlapsClosedInterval Returns true if the chunk overlaps [mint, maxt].
+// OverlapsClosedInterval 用于确定给定的时间范围是否与关联 Chunk 实例所覆盖的时间范围有重合
 func (cm *Meta) OverlapsClosedInterval(mint, maxt int64) bool {
 	// The chunk itself is a closed interval [cm.MinTime, cm.MaxTime].
 	return cm.MinTime <= maxt && mint <= cm.MaxTime
@@ -104,14 +107,16 @@ func newCRC32() hash.Hash32 {
 // Writer implements the ChunkWriter interface for the standard
 // serialization format.
 type Writer struct {
-	dirFile *os.File
-	files   []*os.File
-	wbuf    *bufio.Writer
-	n       int64
-	crc32   hash.Hash
-	buf     [binary.MaxVarintLen32]byte
+	dirFile *os.File // 磁盘上存储时序数据的目录
+	// dirFile 目录下存储时序数据的 segment 文件集合, 其中只有最后一个 segment 文件是当前
+	// 有效的, 即当前可以写入数据的 segment 文件, 之前的 segment 文件不可写
+	files []*os.File
+	wbuf  *bufio.Writer // 用于写文件的 bufio.Writer, 该 Writer 是带缓冲区的
+	n     int64         // 当前分段已经写入的字节数
+	crc32 hash.Hash     // CRC32 校验码, 每一个写入的 Chunk 都会生成一个校验码
+	buf   [binary.MaxVarintLen32]byte
 
-	segmentSize int64
+	segmentSize int64 // 每个分段文件的大小上限, 默认是 512*1024*1024
 }
 
 const (
@@ -136,6 +141,7 @@ func newWriter(dir string, segmentSize int64) (*Writer, error) {
 		segmentSize = DefaultChunkSegmentSize
 	}
 
+	// 创建 dir 参数指定的目录, 并给予足够的权限
 	if err := os.MkdirAll(dir, 0777); err != nil {
 		return nil, err
 	}
@@ -143,10 +149,10 @@ func newWriter(dir string, segmentSize int64) (*Writer, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Writer{
+	return &Writer{ // 初始化 Writer 实例
 		dirFile:     dirFile,
 		n:           0,
-		crc32:       newCRC32(),
+		crc32:       newCRC32(), // 创建复用的 CRC32 循环校验码
 		segmentSize: segmentSize,
 	}, nil
 }
@@ -318,12 +324,12 @@ func (w *Writer) WriteChunks(chks ...Meta) error {
 	var (
 		batchSize  = int64(0)
 		batchStart = 0
-		batches    = make([][]Meta, 1)
+		batches    = make([][]Meta, 1) // batches 在下面遍历后有多少维即表示需要在多少个 segment 中写入本批 chks
 		batchID    = 0
 		firstBatch = true
 	)
 
-	for i, chk := range chks {
+	for i, chk := range chks { // 计算待写入的所有 Chunk 实例的字节总数
 		// Each chunk contains: data length + encoding + the data itself + crc32
 		chkSize := int64(MaxChunkLengthFieldSize) // The data length is a variable length field so use the maximum possible value.
 		chkSize += ChunkEncodingSize              // The chunk encoding.
@@ -333,28 +339,31 @@ func (w *Writer) WriteChunks(chks ...Meta) error {
 
 		// Cut a new batch when it is not the first chunk(to avoid empty segments) and
 		// the batch is too large to fit in the current segment.
+		// 不为首个 chunk(避免空 segment) 且待写入的所有 Chunk 实例数据总字节数超过一个 segment 所能
+		// 写入的最大字节数, 则切换到一个新的 segment 继续写入
 		cutNewBatch := (i != 0) && (batchSize+SegmentHeaderSize > w.segmentSize)
 
 		// When the segment already has some data than
 		// the first batch size calculation should account for that.
+		// segment 中存在已写入的数据
 		if firstBatch && w.n > SegmentHeaderSize {
 			cutNewBatch = batchSize+w.n > w.segmentSize
-			if cutNewBatch {
+			if cutNewBatch { // 待写入的数据加上已有数据超过了 segment 最大字节数限制
 				firstBatch = false
 			}
 		}
 
-		if cutNewBatch {
+		if cutNewBatch { // cutNewBatch 为 true 表示需要新建一个 segment
 			batchStart = i
 			batches = append(batches, []Meta{})
 			batchID++
-			batchSize = chkSize
+			batchSize = chkSize // 重置 batchSize 为当前遍历的 Chunk 的大小, 重新开始计数
 		}
 		batches[batchID] = chks[batchStart : i+1]
 	}
 
 	// Create a new segment when one doesn't already exist.
-	if w.n == 0 {
+	if w.n == 0 { // 首次写入 Chunk, 则新建一个 segment
 		if err := w.cut(); err != nil {
 			return err
 		}

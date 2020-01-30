@@ -1,10 +1,11 @@
 groups:
-- name: my-group-name
+- name: my-group-name # Rule Group 的名称
   rules:
   - alert: InstanceDown
     expr: up == 0
-    for: 1m
-    labels:
+    for: 1m # 告警触发的等待时间, 只有告警条件被触发的持续时间超过这里配置的时长, 
+            # 才会真正向 AlertManager 发送通知
+    labels: # 用户自定义 Label, 这些 Label 会被追加到告警信息中
       severity: critical
-    annotations:
+    annotations: # 在告警产生时, 会将 annotations 作为附加信息一并发给 AlertManager, 这里支持模板配置
       description: "stuff's happening with {{ $labels.service }}"

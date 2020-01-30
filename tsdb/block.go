@@ -95,17 +95,18 @@ type StringTuples interface {
 	At(i int) ([]string, error)
 }
 
+// ChunkWriter 是 Prometheus TSDB 中负责时序数据持久化的接口之一
 // ChunkWriter serializes a time block of chunked series data.
 type ChunkWriter interface {
 	// WriteChunks writes several chunks. The Chunk field of the ChunkMetas
 	// must be populated.
 	// After returning successfully, the Ref fields in the ChunkMetas
 	// are set and can be used to retrieve the chunks from the written data.
-	WriteChunks(chunks ...chunks.Meta) error
+	WriteChunks(chunks ...chunks.Meta) error // 持久化多个 Chunk 实例中的时序数据
 
 	// Close writes any required finalization and closes the resources
 	// associated with the underlying writer.
-	Close() error
+	Close() error // 关闭底层关联的文件资源
 }
 
 // ChunkReader provides reading access of serialized time series data.

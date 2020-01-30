@@ -1,21 +1,25 @@
 # my global config
 global:
-  scrape_interval:     15s
-  evaluation_interval: 30s
+  scrape_interval:     15s # 配置了 Prometheus 抓取 target 的时间间隔, 默认值 1min 抓取一次
+  scrape_timeout:      10s # 抓取 target 的超时时间, 默认值为 10s
+  evaluation_interval: 30s # 指定 Prometheus 计算一个 Rule 配置的时间间隔
   # scrape_timeout is set to the global default (10s).
 
+  # 在外部系统进行传输时, 会将 external_labels 中指定的 Label 添加到时序上, 前提是
+  # 时序上没有冲突 Label, 如果存在冲突的 Label, 则不会添加该配置中的 Label
   external_labels:
     monitor: codelab
     foo:     bar
 
+# 指定 Rule 配置文件的路径
 rule_files:
 - "first.rules"
 - "my/*.rules"
 
 remote_write:
-  - url: http://remote1/push
+  - url: http://remote1/push # 写入远程存储的地址
     name: drop_expensive
-    write_relabel_configs:
+    write_relabel_configs: # 在写入远程存储前, 会触发 Relabel 操作
     - source_labels: [__name__]
       regex:         expensive.*
       action:        drop
@@ -39,34 +43,48 @@ remote_read:
       key_file: valid_key_file
 
 scrape_configs:
+  # job 的名称, Prometheus 会将该名称作为 Label 追加到抓取的每条时序中
 - job_name: prometheus
 
+  # 决定 Prometheus 如何处理时序数据中出现的 Label 冲突
+  # 为 true, 则会保留时序中原有 Label, 忽略 Prometheus Server 端追加的冲突 Label.
+  # 为 false, 则在时序原有的 Label Name 前追加 "exported_" 标识, Prometheus Server 端追加的 Label 不变
+  # 注: external_labels 配置项中定义的 Label 并不会受该配置的影响
   honor_labels: true
+  # 这里的 scrape_internal 和 scrape_timeout 配置会覆盖 global 部分的同名配置, 且只对该 job 生效
   # scrape_interval is defined by the configured global (15s).
   # scrape_timeout is defined by the global default (10s).
 
   # metrics_path defaults to '/metrics'
   # scheme defaults to 'http'.
 
+  # 基于文件的服务发现: 重新加载
   file_sd_configs:
-    - files:
+    - files: # 下面的文件中配置了相关的 target 信息
       - foo/*.slow.json
       - foo/*.slow.yml
       - single/file.yml
-      refresh_interval: 10m
+      refresh_interval: 10m # Prometheus 每隔 10min 会重新加载上述配置文件, 更新其 target 信息
     - files:
       - bar/*.yaml
 
+  # 用静态方式配置该 job 要抓取的地址, 每个地址对应一个 target
   static_configs:
   - targets: ['localhost:9090', 'localhost:9191']
-    labels:
+    labels: # 上述 target 的公共 Label, 从上述 targets 抓取到的全部时序都会被追加到这些公共 Label
       my:   label
       your: label
 
+  # 用于配置 Prometheus 的 Relabel 操作, 该操作的主要目的是修改 Label 信息
   relabel_configs:
+    # source_labels 指定参与 Relabel 操作的 Label name, 如果指定多个 Label name, 以逗号分隔
   - source_labels: [job, __meta_dns_name]
+    # 指定一个正则表达式, 只有符合该正则的 Label Name, 才能被该 Relabel 操作处理
     regex:         (.*)some-[regex]
+    # 经过该 Relabel 操作处理的 Label Value 值会被写入 target_label 指定的 Label 中
     target_label:  job
+    # 如果 Label Value 符合 regex 指定的正则, 则会被替换成 replacement 指定的格式
+    # 其中 $1 即为原 Label Value
     replacement:   foo-${1}
     # action defaults to 'replace'
   - source_labels: [abc]
@@ -91,7 +109,9 @@ scrape_configs:
 
   sample_limit: 1000
 
+  # metrics_path 是抓取时序数据的 http path, 默认值为 "/metrics"
   metrics_path: /my_path
+  # scheme: 抓取时序数据时使用的网络协议, 默认 http
   scheme: https
 
   dns_sd_configs:
@@ -106,19 +126,20 @@ scrape_configs:
   relabel_configs:
   - source_labels: [job]
     regex:         (.*)some-[regex]
-    action:        drop
+    action:        drop # 如果 Label Value 符合 RelabelConfig 指定的正则表达式, 则过滤掉该时序
   - source_labels: [__address__]
     modulus:       8
     target_label:  __tmp_hash
-    action:        hashmod
+    action:        hashmod # 计算参与 Relabe 操作的 Label Value 的 hash 值并取模, 然后生成新的 Label 记录该计算结果
   - source_labels: [__tmp_hash]
     regex:         1
-    action:        keep
+    action:        keep # 如果 Label Value 不符合 RelabelConfig 指定的正则表达式, 则过滤掉该时序
+    # 匹配全部 Label Name, 符合指定正则表达式的 Label Name 会根据指定的模板生成新的 Label Name, 此过程中的 Label Value 不多
   - action:        labelmap
     regex:         1
-  - action:        labeldrop
+  - action:        labeldrop # 如果 Label Name 符合指定的正则表达式, 则将该 Label 删除
     regex:         d
-  - action:        labelkeep
+  - action:        labelkeep # 如果 Label Name 不符合指定的正则表达式, 则将该 Label 删除
     regex:         k
 
   metric_relabel_configs:
@@ -271,9 +292,9 @@ scrape_configs:
       key_file:  valid_key_file
 
 alerting:
-  alertmanagers:
-  - scheme: https
-    static_configs:
+  alertmanagers: # 配置 AlerManager 的相关信息
+  - scheme: https # Prometheus Server 向 AlertManager 发送请求时使用的 scheme
+    static_configs: # 静态配置 AlertManager 的地址, 与静态配置 target 地址的方法类似
     - targets:
       - "1.2.3.4:9093"
       - "1.2.3.5:9093"
