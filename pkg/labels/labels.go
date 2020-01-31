@@ -33,19 +33,24 @@ const (
 	InstanceName = "instance"
 )
 
+// Prometheus 通过一组 Label 可以确定一条时序, 如果加上 timestamp 就可确定该时序中的一个点
+// Prometheus 中的每个 Label 都是一个 Key/Value 组合.
 // Label is a key/value pair of strings.
 type Label struct {
-	Name, Value string
+	Name, Value string // 分别记录 Label Name 和 Label Value 值
 }
 
 // Labels is a sorted set of labels. Order has to be guaranteed upon
 // instantiation.
+// Labels 用于表示一条时序中包含的多个 Label, 在 Labels 中的 Label 实例是按序存储的
 type Labels []Label
 
+// Labels 实现了 sort.Interface 接口, 可以对其内部的 Label 进行排序, 其中 Less 方法只比较两个 Label 元素的 Name 值, 其 Value 并不参与比较
 func (ls Labels) Len() int           { return len(ls) }
 func (ls Labels) Swap(i, j int)      { ls[i], ls[j] = ls[j], ls[i] }
 func (ls Labels) Less(i, j int) bool { return ls[i].Name < ls[j].Name }
 
+// String Labels 实现了 Stringer 接口, 支持以格式化的形式输出其中全部 Label 的 Name 以及 Value
 func (ls Labels) String() string {
 	var b bytes.Buffer
 
@@ -182,6 +187,7 @@ func (ls Labels) Copy() Labels {
 
 // Get returns the value for the label with the given name.
 // Returns an empty string if the label doesn't exist.
+// Get 根据指定的 Name 值查找对应 Label 的 Value 值
 func (ls Labels) Get(name string) string {
 	for _, l := range ls {
 		if l.Name == name {
@@ -220,6 +226,7 @@ func (ls Labels) WithoutEmpty() Labels {
 }
 
 // Equal returns whether the two label sets are equal.
+// Equal 检测两个 Labels 实例是否相等, 会逐一比较 Label 的 Name 和 Value 值
 func Equal(ls, o Labels) bool {
 	if len(ls) != len(o) {
 		return false
@@ -233,6 +240,8 @@ func Equal(ls, o Labels) bool {
 }
 
 // Map returns a string map of the labels.
+// Labels 可以通过该方法将其中存储的 Label 元素转换成 map 返回,
+// 该 map 中的 key 是 Label 的 Name 值, value 是 Label 的 Value 值
 func (ls Labels) Map() map[string]string {
 	m := make(map[string]string, len(ls))
 	for _, l := range ls {
@@ -278,6 +287,7 @@ func FromStrings(ss ...string) Labels {
 
 // Compare compares the two label sets.
 // The result will be 0 if a==b, <0 if a < b, and >0 if a > b.
+// Compare 两个 Labels 实例, 在比较两个 Labels 时, 会逐个对比其中 Label 实例的 Name 值和 Value 值.
 func Compare(a, b Labels) int {
 	l := len(a)
 	if len(b) < l {

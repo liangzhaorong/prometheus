@@ -166,12 +166,16 @@ func (w *Writer) tail() *os.File {
 
 // finalizeTail writes all pending data to the current tail file,
 // truncates its size, and closes it.
+//
+// finalizeTail 将已写入当前 segment 文件的时序数据刷新到磁盘中, 并对当前
+// segment 文件中预分配但是未使用的部分进行截断, 最后关闭文件.
 func (w *Writer) finalizeTail() error {
-	tf := w.tail()
+	tf := w.tail() // 获取 files 集合中的最后一个文件, 即当前有效的写入文件
 	if tf == nil {
 		return nil
 	}
 
+	// 调用 wbuf 字段(bufio.Writer)的 Flush() 方法将数据刷新到磁盘中
 	if err := w.wbuf.Flush(); err != nil {
 		return err
 	}
@@ -179,6 +183,7 @@ func (w *Writer) finalizeTail() error {
 		return err
 	}
 	// As the file was pre-allocated, we truncate any superfluous zero bytes.
+	// 在创建文件时会进行预分配, 这里获取当前写入的位置, 并调用 Truncate() 方法进行截断
 	off, err := tf.Seek(0, io.SeekCurrent)
 	if err != nil {
 		return err
@@ -187,44 +192,46 @@ func (w *Writer) finalizeTail() error {
 		return err
 	}
 
-	return tf.Close()
+	return tf.Close() // 关闭当前文件
 }
 
 func (w *Writer) cut() error {
 	// Sync current tail to disk and close.
+	// 通过 finializeTail() 方法完成当前文件的写入
 	if err := w.finalizeTail(); err != nil {
 		return err
 	}
 
-	p, _, err := nextSequenceFile(w.dirFile.Name())
+	p, _, err := nextSequenceFile(w.dirFile.Name()) // 计算下一个写入的新 segment 文件的名称
 	if err != nil {
 		return err
 	}
-	f, err := os.OpenFile(p, os.O_WRONLY|os.O_CREATE, 0666)
+	f, err := os.OpenFile(p, os.O_WRONLY|os.O_CREATE, 0666) // 创建新的 segment
 	if err != nil {
 		return err
 	}
+	// 按照 segment 文件的上限进行预分配
 	if err = fileutil.Preallocate(f, w.segmentSize, true); err != nil {
 		return err
 	}
-	if err = w.dirFile.Sync(); err != nil {
+	if err = w.dirFile.Sync(); err != nil { // 将上述 segment 文件创建以及预分配操作同步到磁盘
 		return err
 	}
 
 	// Write header metadata for new file.
-	metab := make([]byte, SegmentHeaderSize)
-	binary.BigEndian.PutUint32(metab[:MagicChunksSize], MagicChunks)
-	metab[4] = chunksFormatV1
+	metab := make([]byte, SegmentHeaderSize)                         // 创建 segment 文件头, 8 字节
+	binary.BigEndian.PutUint32(metab[:MagicChunksSize], MagicChunks) // 将前 4 个字节写入固定头信息
+	metab[4] = chunksFormatV1                                        // 写入版本信息
 
-	n, err := f.Write(metab)
+	n, err := f.Write(metab) // 将 8 字节文件头写入 segment 文件中
 	if err != nil {
 		return err
 	}
-	w.n = int64(n)
+	w.n = int64(n) // 更新当前 segment 文件中的总字节数
 
-	w.files = append(w.files, f)
+	w.files = append(w.files, f) // 将新建的 segment 文件记录到 Writer.files 集合中
 	if w.wbuf != nil {
-		w.wbuf.Reset(f)
+		w.wbuf.Reset(f) // 将 wbuf 从上一个文件指向新建的文件
 	} else {
 		w.wbuf = bufio.NewWriterSize(f, 8*1024*1024)
 	}
@@ -232,6 +239,7 @@ func (w *Writer) cut() error {
 	return nil
 }
 
+// wbuf 指向 bufio.Writer(即指向 sengment 文件)
 func (w *Writer) write(b []byte) error {
 	n, err := w.wbuf.Write(b)
 	w.n += int64(n)
@@ -320,13 +328,16 @@ func MergeChunks(a, b chunkenc.Chunk) (*chunkenc.XORChunk, error) {
 // WriteChunks writes as many chunks as possible to the current segment,
 // cuts a new segment when the current segment is full and
 // writes the rest of the chunks in the new segment.
+//
+// WriteChunks 写入多个 chunks 到当前 segment 中, 若当前 segment 已满则新建一个新的
+// segment 并将剩余的 chunks 写入到新的 segment 中
 func (w *Writer) WriteChunks(chks ...Meta) error {
 	var (
 		batchSize  = int64(0)
 		batchStart = 0
 		batches    = make([][]Meta, 1) // batches 在下面遍历后有多少维即表示需要在多少个 segment 中写入本批 chks
 		batchID    = 0
-		firstBatch = true
+		firstBatch = true // 为 false 表示需要在多个 segment 中写入本批 chunks
 	)
 
 	for i, chk := range chks { // 计算待写入的所有 Chunk 实例的字节总数
@@ -375,7 +386,7 @@ func (w *Writer) WriteChunks(chks ...Meta) error {
 		}
 		// Cut a new segment only when there are more chunks to write.
 		// Avoid creating a new empty segment at the end of the write.
-		if i < len(batches)-1 {
+		if i < len(batches)-1 { // 当前 segment 已满时切换新的 segment 继续写入
 			if err := w.cut(); err != nil {
 				return err
 			}
@@ -392,8 +403,9 @@ func (w *Writer) writeChunks(chks []Meta) error {
 		return nil
 	}
 
+	// 将当前 segment 文件在 Writer.files 集合中的下标记录到 seq 变量的高 32 位中
 	var seq = uint64(w.seq()) << 32
-	for i := range chks {
+	for i := range chks { // 将 chunk 逐个写入到 segment 文件中
 		chk := &chks[i]
 
 		// The reference is set to the segment index and the offset where
@@ -401,21 +413,27 @@ func (w *Writer) writeChunks(chks []Meta) error {
 		//
 		// The upper 4 bytes are for the segment index and
 		// the lower 4 bytes are for the segment offset where to start reading this chunk.
+		//
+		// 更新 Ref 字段, 其中高 32 位明确了该 Chunk 在哪个 segment 文件中,
+		// 低 32 位记录了该 Chunk 在 segment 文件中的字节偏移量
 		chk.Ref = seq | uint64(w.n)
 
+		// 统计该 Chunk 的字节数
 		n := binary.PutUvarint(w.buf[:], uint64(len(chk.Chunk.Bytes())))
 
-		if err := w.write(w.buf[:n]); err != nil {
+		if err := w.write(w.buf[:n]); err != nil { // 将当前 chunk 的字节数值写入到 segment 中
 			return err
 		}
-		w.buf[0] = byte(chk.Chunk.Encoding())
+		w.buf[0] = byte(chk.Chunk.Encoding()) // 将 Chunk 的编码类型写入 segment 文件中
 		if err := w.write(w.buf[:1]); err != nil {
 			return err
 		}
+		// 将 Chunk 中记录的时序数据写入 segment 文件中
 		if err := w.write(chk.Chunk.Bytes()); err != nil {
 			return err
 		}
 
+		// 计算该 Chunk 的 CRC32 校验码并写入 segment 文件中
 		w.crc32.Reset()
 		if err := chk.writeHash(w.crc32, w.buf[:]); err != nil {
 			return err
@@ -462,13 +480,20 @@ func (b realByteSlice) Sub(start, end int) ByteSlice {
 
 // Reader implements a ChunkReader for a serialized byte stream
 // of series data.
+// Reader 是 ChunkReader 接口的实现之一
 type Reader struct {
 	// The underlying bytes holding the encoded series data.
 	// Each slice holds the data for a different segment.
-	bs   []ByteSlice
-	cs   []io.Closer // Closers for resources behind the byte slices.
-	size int64       // The total size of bytes in the reader.
-	pool chunkenc.Pool
+	//
+	// ByteSlice 接口是对 byte 切片的抽象, 它提供了两个方法, 一个是 Len() 方法, 用于返回底层 byte
+	// 切片的长度; 另一个是 Range() 方法, 用于返回底层 byte 切片在指定区间内的数据. ByteSlice 接口的
+	// 实现是 realByteSlice, realByteSlice 则是 []byte 的类型别名.
+	// bs 字段存储的是时序数据, 其中每个 ByteSlice 实例都对应一个 segment 文件的数据
+	bs []ByteSlice
+	// 当前 Reader 实例能够读取的文件集合, 其中每个元素都对应一个 segment 文件
+	cs   []io.Closer   // Closers for resources behind the byte slices.
+	size int64         // The total size of bytes in the reader.
+	pool chunkenc.Pool // 用于存储可重用的 Chunk 实例
 }
 
 func newReader(bs []ByteSlice, cs []io.Closer, pool chunkenc.Pool) (*Reader, error) {
@@ -497,11 +522,12 @@ func newReader(bs []ByteSlice, cs []io.Closer, pool chunkenc.Pool) (*Reader, err
 // NewDirReader returns a new Reader against sequentially numbered files in the
 // given directory.
 func NewDirReader(dir string, pool chunkenc.Pool) (*Reader, error) {
+	// 读取指定 chunks 文件夹中的 segment 文件并按照文件名进行排序
 	files, err := sequenceFiles(dir)
 	if err != nil {
 		return nil, err
 	}
-	if pool == nil {
+	if pool == nil { // 初始化 Chunk 池
 		pool = chunkenc.NewPool()
 	}
 
@@ -511,17 +537,17 @@ func NewDirReader(dir string, pool chunkenc.Pool) (*Reader, error) {
 		merr tsdb_errors.MultiError
 	)
 	for _, fn := range files {
-		f, err := fileutil.OpenMmapFile(fn)
+		f, err := fileutil.OpenMmapFile(fn) // 通过 mmap 系统调用将当前整个 segment 文件映射到内存
 		if err != nil {
 			merr.Add(errors.Wrap(err, "mmap files"))
 			merr.Add(closeAll(cs))
 			return nil, merr
 		}
-		cs = append(cs, f)
-		bs = append(bs, realByteSlice(f.Bytes()))
+		cs = append(cs, f)                        // 将映射得到的 MmapFile 实例追加到 cs 切片中
+		bs = append(bs, realByteSlice(f.Bytes())) // 将 segment 文件映射到 bs 切片中
 	}
 
-	reader, err := newReader(bs, cs, pool)
+	reader, err := newReader(bs, cs, pool) // 其中完成文件头的校验以及 Reader 实例的创建
 	if err != nil {
 		merr.Add(err)
 		merr.Add(closeAll(cs))
@@ -540,28 +566,37 @@ func (s *Reader) Size() int64 {
 }
 
 // Chunk returns a chunk from a given reference.
+//
+// Chunk 根据传入的 ref 参数在当前 chunks 目录中查找对应 Chunk 数据的位置, 然后从
+// Chunk 池中获取一个空闲的 Chunk 实例, 最后从文件中读取时序数据填充到 Chunk 实例中,
+// 并将其返回.
 func (s *Reader) Chunk(ref uint64) (chunkenc.Chunk, error) {
 	var (
 		// Get the upper 4 bytes.
 		// These contain the segment index.
-		sgmIndex = int(ref >> 32)
+		sgmIndex = int(ref >> 32) // 从 ref 参数的高 32 位中获取对应 chunk 所在的 segment 文件编号
 		// Get the lower 4 bytes.
 		// These contain the segment offset where the data for this chunk starts.
+		// 从 ref 参数的低 32 位中获取 Chunk 在该 segment 文件中的字节偏移量
 		chkStart = int((ref << 32) >> 32)
 		chkCRC32 = newCRC32()
 	)
 
+	// 检测编号是否合法, 即检测 seq 编号是否大于 chunks 目录中的最大编号
 	if sgmIndex >= len(s.bs) {
 		return nil, errors.Errorf("segment index %d out of range", sgmIndex)
 	}
 
-	sgmBytes := s.bs[sgmIndex]
+	sgmBytes := s.bs[sgmIndex] // 获取指定编号对应的 segment 文件数据
 
+	// 查找到正确的 segment 文件后, 检测 chkStart 偏移量是否合法, 即检测 chkStart 偏移量是否
+	// 超过了该 segment 文件的大小
 	if chkStart+MaxChunkLengthFieldSize > sgmBytes.Len() {
 		return nil, errors.Errorf("segment doesn't include enough bytes to read the chunk size data field - required:%v, available:%v", chkStart+MaxChunkLengthFieldSize, sgmBytes.Len())
 	}
 	// With the minimum chunk length this should never cause us reading
 	// over the end of the slice.
+	// 读取 Chunk 在文件中所占的字节数
 	c := sgmBytes.Range(chkStart, chkStart+MaxChunkLengthFieldSize)
 	chkDataLen, n := binary.Uvarint(c)
 	if n <= 0 {
@@ -573,24 +608,30 @@ func (s *Reader) Chunk(ref uint64) (chunkenc.Chunk, error) {
 	chkDataStart := chkEncStart + ChunkEncodingSize
 	chkDataEnd := chkEnd - crc32.Size
 
+	// 要读取的 Chunk 的超出了该 segment 文件的字节数限制
 	if chkEnd > sgmBytes.Len() {
 		return nil, errors.Errorf("segment doesn't include enough bytes to read the chunk - required:%v, available:%v", chkEnd, sgmBytes.Len())
 	}
 
+	// 获取 ref 对应的时序数据的 crc32 校验码
 	sum := sgmBytes.Range(chkDataEnd, chkEnd)
 	if _, err := chkCRC32.Write(sgmBytes.Range(chkEncStart, chkDataEnd)); err != nil {
 		return nil, err
 	}
 
+	// 根据 CRC32 检测读取到的 Chunk 数据是否有效
 	if act := chkCRC32.Sum(nil); !bytes.Equal(act, sum) {
 		return nil, errors.Errorf("checksum mismatch expected:%x, actual:%x", sum, act)
 	}
 
+	// 读取 ref 对应的时序数据
 	chkData := sgmBytes.Range(chkDataStart, chkDataEnd)
-	chkEnc := sgmBytes.Range(chkEncStart, chkEncStart+ChunkEncodingSize)[0]
+	chkEnc := sgmBytes.Range(chkEncStart, chkEncStart+ChunkEncodingSize)[0] // 获取时序数据对应的编码类型
+	// 从 Chunk 池中获取一个空闲的 Chunk 实例, 并将 Encoding 方式以及时序数据填充进去
 	return s.pool.Get(chunkenc.Encoding(chkEnc), chkData)
 }
 
+// nextSequenceFile 计算下一个 segment 文件的名称
 func nextSequenceFile(dir string) (string, int, error) {
 	names, err := fileutil.ReadDir(dir)
 	if err != nil {

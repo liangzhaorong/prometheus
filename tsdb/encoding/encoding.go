@@ -28,8 +28,10 @@ var (
 )
 
 // Encbuf is a helper type to populate a byte slice with various types.
+// Encbuf 负责将指定的数据序列化成 byte 数据
 type Encbuf struct {
-	B []byte
+	B []byte // 用于缓存序列化之后的数据
+	// 该字段是一个可重用的缓冲区, 在写入整数时, 会先将整数转换成 []byte 记录到该字段中, 然后再将其写入 b 字段
 	C [binary.MaxVarintLen64]byte
 }
 
@@ -97,7 +99,7 @@ func (e *Encbuf) PutHashSum(h hash.Hash) {
 // Several datums can be extracted without checking for errors. However, before using
 // any datum, the err() method must be checked.
 type Decbuf struct {
-	B []byte
+	B []byte // 保存反序列化的 byte 数据
 	E error
 }
 
@@ -108,7 +110,7 @@ func NewDecbufAt(bs ByteSlice, off int, castagnoliTable *crc32.Table) Decbuf {
 	if bs.Len() < off+4 {
 		return Decbuf{E: ErrInvalidSize}
 	}
-	b := bs.Range(off, off+4)
+	b := bs.Range(off, off+4) // 先读取 off 之后的 4 个字节, 获取目标部分的字节长度
 	l := int(binary.BigEndian.Uint32(b))
 
 	if bs.Len() < off+4+l+4 {
@@ -116,11 +118,12 @@ func NewDecbufAt(bs ByteSlice, off int, castagnoliTable *crc32.Table) Decbuf {
 	}
 
 	// Load bytes holding the contents plus a CRC32 checksum.
-	b = bs.Range(off+4, off+4+l+4)
-	dec := Decbuf{B: b[:len(b)-4]}
+	b = bs.Range(off+4, off+4+l+4) // 获取待读取部分的数据, 最后 4 个字节时该部分的 CRC32 校验码
+	dec := Decbuf{B: b[:len(b)-4]} // 截掉 CRC32 校验码
 
 	if castagnoliTable != nil {
 
+		// 检测 CRC32 校验码是否正确
 		if exp := binary.BigEndian.Uint32(b[len(b)-4:]); dec.Crc32(castagnoliTable) != exp {
 			return Decbuf{E: ErrInvalidChecksum}
 		}
@@ -230,28 +233,28 @@ func (d *Decbuf) Uvarint64() uint64 {
 }
 
 func (d *Decbuf) Be64() uint64 {
-	if d.E != nil {
+	if d.E != nil { // 检测当前 Decbuf 实例在之前反序列化过程中是否出现异常
 		return 0
 	}
-	if len(d.B) < 8 {
+	if len(d.B) < 8 { // 可读字节数不足 8 个, 则无法读取 uint64 类型的整数
 		d.E = ErrInvalidSize
 		return 0
 	}
-	x := binary.BigEndian.Uint64(d.B)
-	d.B = d.B[8:]
+	x := binary.BigEndian.Uint64(d.B) // 读取 uint64
+	d.B = d.B[8:]                     // 更新字段, 清理已读取的部分
 	return x
 }
 
 func (d *Decbuf) Be32() uint32 {
-	if d.E != nil {
+	if d.E != nil { // 检测当前 Decbuf 实例在之前反序列化过程中是否出现异常
 		return 0
 	}
-	if len(d.B) < 4 {
+	if len(d.B) < 4 { // 可读字节数不足 4 个, 则无法读取 uint32 类型的整数
 		d.E = ErrInvalidSize
 		return 0
 	}
-	x := binary.BigEndian.Uint32(d.B)
-	d.B = d.B[4:]
+	x := binary.BigEndian.Uint32(d.B) // 读取 uint32
+	d.B = d.B[4:]                     // 更新字段, 清理已读取的部分
 	return x
 }
 

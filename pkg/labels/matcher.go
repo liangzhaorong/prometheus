@@ -43,12 +43,13 @@ func (m MatchType) String() string {
 }
 
 // Matcher models the matching of a label.
+// Matcher 主要用于匹配时序中指定 Label 的 Value 值, 从而实现过滤时序数据的功能.
 type Matcher struct {
 	Type  MatchType
-	Name  string
-	Value string
+	Name  string // 需要匹配的 Label Name 值
+	Value string // 需要匹配的 Label Value 值
 
-	re *regexp.Regexp
+	re *regexp.Regexp // 指定时序数据中对应 Label Vaelu 的规则, 只有 Label Value 值符合该正则表达式, 时序才能匹配成功
 }
 
 // NewMatcher returns a matcher object.
@@ -82,6 +83,7 @@ func (m *Matcher) String() string {
 }
 
 // Matches returns whether the matcher matches the given string value.
+// Matches 检测传入的 Label Value 值是否符合当前 Matcher 的规则
 func (m *Matcher) Matches(s string) bool {
 	switch m.Type {
 	case MatchEqual:

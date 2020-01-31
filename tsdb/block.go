@@ -37,9 +37,15 @@ import (
 
 // IndexWriter serializes the index for a block of series data.
 // The methods must be called in the order they are specified in.
+//
+// IndexWriter 接口中定义了与 Prometheus TSDB 写入一个完整的 index 文件相关的所有方法.
+// 在通过 IndexWriter 接口的实现写入 index 文件时, 必须按照 IndexWriter 接口定义的顺序
+// 依次调用其中的写入方法, 才能正确写入相应部分的数据, 得到一个合法的 index 文件.
 type IndexWriter interface {
 	// AddSymbols registers all string symbols that are encountered in series
 	// and other indices. Symbols must be added in sorted order.
+	//
+	// AddSymbol 方法负责写入 index 文件中的 Symbol Table 部分
 	AddSymbol(sym string) error
 
 	// AddSeries populates the index writer with a series and its offsets
@@ -48,6 +54,8 @@ type IndexWriter interface {
 	// their labels.
 	// The reference numbers are used to resolve entries in postings lists that
 	// are added later.
+	//
+	// AddSeries 方法负责写入 Series 部分的内容
 	AddSeries(ref uint64, l labels.Labels, chunks ...chunks.Meta) error
 
 	// Close writes any finalization and closes the resources associated with
@@ -60,15 +68,17 @@ type IndexReader interface {
 	// Symbols return an iterator over sorted string symbols that may occur in
 	// series' labels and indices. It is not safe to use the returned strings
 	// beyond the lifetime of the index reader.
-	Symbols() index.StringIter
+	Symbols() index.StringIter // 读取 index 文件中的 Symbol Table 部分
 
 	// LabelValues returns sorted possible label values.
+	// 查找 Label Name 对应的 Label Value 集合, 主要读取 index 文件中的 Label Index 部分
 	LabelValues(names ...string) (index.StringTuples, error)
 
 	// Postings returns the postings list iterator for the label pairs.
 	// The Postings here contain the offsets to the series inside the index.
 	// Found IDs are not strictly required to point to a valid Series, e.g.
 	// during background garbage collections. Input values must be sorted.
+	// 根据传入的 Label 查询对应的 Postings, 主要读取 index 文件的 Postings 部分
 	Postings(name string, values ...string) (index.Postings, error)
 
 	// SortedPostings returns a postings list that is reordered to be sorted
@@ -78,10 +88,12 @@ type IndexReader interface {
 	// Series populates the given labels and chunk metas for the series identified
 	// by the reference.
 	// Returns ErrNotFound if the ref does not resolve to a known series.
+	// 根据时序编号, 查询对应时序的 Label 和 Chunk 元数据, 将其分别记录到 lset 和 cnks 并返回,
+	// 主要读取 index 文件的 Series 部分
 	Series(ref uint64, lset *labels.Labels, chks *[]chunks.Meta) error
 
 	// LabelNames returns all the unique label names present in the index in sorted order.
-	LabelNames() ([]string, error)
+	LabelNames() ([]string, error) // 获取 Label Index 中的全部 Label
 
 	// Close releases the underlying resources of the reader.
 	Close() error
@@ -110,24 +122,27 @@ type ChunkWriter interface {
 }
 
 // ChunkReader provides reading access of serialized time series data.
+// ChunkReader 接口主要用于将持久化的时序数据读取到内存, 并封装到相应的 Chunk 实例中
 type ChunkReader interface {
 	// Chunk returns the series data chunk with the given reference.
+	// Chunk 会根据 ref 参数读取对应的 Chunk 并返回, 这里的 ref 参数即为在写入 Chunk 实例时为其填充的 Ref 字段
 	Chunk(ref uint64) (chunkenc.Chunk, error)
 
 	// Close releases all underlying resources of the reader.
-	Close() error
+	Close() error // 关闭当前 ChunkReader 并释放所有资源
 }
 
 // BlockReader provides reading access to a data block.
+// BlockReader 接口中定义了读取 block 目录下各种数据文件的方法
 type BlockReader interface {
 	// Index returns an IndexReader over the block's data.
-	Index() (IndexReader, error)
+	Index() (IndexReader, error) // 返回用于读取 index 文件的 IndexReader 实例
 
 	// Chunks returns a ChunkReader over the block's data.
-	Chunks() (ChunkReader, error)
+	Chunks() (ChunkReader, error) // 返回用于读取 chunk 文件的 ChunkReader 实例
 
 	// Tombstones returns a tombstones.Reader over the block's deleted data.
-	Tombstones() (tombstones.Reader, error)
+	Tombstones() (tombstones.Reader, error) // 返回 tombstones.Reader 实例, 其中缓存了 tombstones 文件的内容
 
 	// Meta provides meta information about the block reader.
 	Meta() BlockMeta
@@ -140,19 +155,23 @@ type Appendable interface {
 }
 
 // BlockMeta provides meta information about a block.
+// BlockMeta 记录了 block 目录涉及的元数据信息, 对应 meta.json 文件
 type BlockMeta struct {
 	// Unique identifier for the block and its contents. Changes on compaction.
-	ULID ulid.ULID `json:"ulid"`
+	ULID ulid.ULID `json:"ulid"` // 16 个字节的唯一标识, 即对应 block 目录的唯一标识
 
 	// MinTime and MaxTime specify the time range all samples
 	// in the block are in.
+	// 该 block 目录所跨越的时间范围, 即 MinTime 到 MaxTime 这段时间的时序数据都会被存储到该 block 目录下
 	MinTime int64 `json:"minTime"`
 	MaxTime int64 `json:"maxTime"`
 
 	// Stats about the contents of the block.
+	// 在 BlockStats 中记录了该 block 目录下时序的条数、时序点的个数、Chunk 的个数以及 tombstone 的个数
 	Stats BlockStats `json:"stats,omitempty"`
 
 	// Information on compactions the block was created from.
+	// 记录与当前 block 相关的压缩信息
 	Compaction BlockMetaCompaction `json:"compaction"`
 
 	// Version of the index format.
@@ -196,6 +215,7 @@ const metaVersion1 = 1
 
 func chunkDir(dir string) string { return filepath.Join(dir, "chunks") }
 
+// readMetaFile 读取 meta.json 文件中的元数据, 将 JSON 数据反序列化成 BlockMeta 实例并返回
 func readMetaFile(dir string) (*BlockMeta, int64, error) {
 	b, err := ioutil.ReadFile(filepath.Join(dir, metaFilename))
 	if err != nil {
@@ -213,14 +233,16 @@ func readMetaFile(dir string) (*BlockMeta, int64, error) {
 	return &m, int64(len(b)), nil
 }
 
+// writeMetaFile 负责更新 block 目录下的 meta.json 元数据文件, 在压缩、删除以及修复 index
+// 文件的过程中, 都需要调用该函数更新变化的元数据信息
 func writeMetaFile(logger log.Logger, dir string, meta *BlockMeta) (int64, error) {
 	meta.Version = metaVersion1
 
 	// Make any changes to the file appear atomic.
-	path := filepath.Join(dir, metaFilename)
+	path := filepath.Join(dir, metaFilename) // 在该 block 目录下, 创建 meta.json.tmp 临时文件
 	tmp := path + ".tmp"
 	defer func() {
-		if err := os.RemoveAll(tmp); err != nil {
+		if err := os.RemoveAll(tmp); err != nil { // 函数结束时移除该临时文件
 			level.Error(logger).Log("msg", "remove tmp file", "err", err.Error())
 		}
 	}()
@@ -236,7 +258,7 @@ func writeMetaFile(logger log.Logger, dir string, meta *BlockMeta) (int64, error
 	}
 
 	var merr tsdb_errors.MultiError
-	n, err := f.Write(jsonMeta)
+	n, err := f.Write(jsonMeta) // 将传入的 BlockMeta 实例转换成 JSON 数据写入临时文件
 	if err != nil {
 		merr.Add(err)
 		merr.Add(f.Close())
@@ -244,33 +266,34 @@ func writeMetaFile(logger log.Logger, dir string, meta *BlockMeta) (int64, error
 	}
 
 	// Force the kernel to persist the file on disk to avoid data loss if the host crashes.
-	if err := f.Sync(); err != nil {
+	if err := f.Sync(); err != nil { // 将数据持久化到磁盘
 		merr.Add(err)
 		merr.Add(f.Close())
 		return 0, merr.Err()
 	}
-	if err := f.Close(); err != nil {
+	if err := f.Close(); err != nil { // 关闭临时文件
 		return 0, err
 	}
-	return int64(n), fileutil.Replace(tmp, path)
+	return int64(n), fileutil.Replace(tmp, path) // 将临时文件重命名为 meta.json
 }
 
+// Prometheus TSDB 将时序数据分成 block 目录存储到磁盘上。 block 目录在内存中的抽象即为 Block 结构体.
 // Block represents a directory of time series data covering a continuous time range.
 type Block struct {
-	mtx            sync.RWMutex
+	mtx            sync.RWMutex // 在读写 block 目录下的时序之前, 都要获取该锁进行同步
 	closing        bool
-	pendingReaders sync.WaitGroup
+	pendingReaders sync.WaitGroup // 用于等待读取时序的操作全部结束
 
-	dir  string
-	meta BlockMeta
+	dir  string    // 对应的 block 目录的路径
+	meta BlockMeta // 对应 block 目录的元数据
 
 	// Symbol Table Size in bytes.
 	// We maintain this variable to avoid recalculation every time.
-	symbolTableSize uint64
+	symbolTableSize uint64 // 记录 Symbol Table 的字节总数
 
-	chunkr     ChunkReader
-	indexr     IndexReader
-	tombstones tombstones.Reader
+	chunkr     ChunkReader       // ChunkReader 用于读取该 block 目录下的 Chunk 文件
+	indexr     IndexReader       // IndexReader 用于读取该 block 目录下的 index 文件
+	tombstones tombstones.Reader // 用于读取该 block 目录下的 tombstone 文件
 
 	logger log.Logger
 
@@ -295,30 +318,34 @@ func OpenBlock(logger log.Logger, dir string, pool chunkenc.Pool) (pb *Block, er
 			err = merr.Err()
 		}
 	}()
+	// 读取该 block 目录下的 meta.json 文件, 将其中的 JSON 数据反序列化成 BlockMeta 实例
 	meta, sizeMeta, err := readMetaFile(dir)
 	if err != nil {
 		return nil, err
 	}
 
+	// 创建 chunks.Reader 实例
 	cr, err := chunks.NewDirReader(chunkDir(dir), pool)
 	if err != nil {
 		return nil, err
 	}
 	closers = append(closers, cr)
 
+	// 创建 index.Reader 实例
 	ir, err := index.NewFileReader(filepath.Join(dir, indexFilename))
 	if err != nil {
 		return nil, err
 	}
 	closers = append(closers, ir)
 
+	// 读取 tombstone 文件, 返回的是 memTombstones 实例
 	tr, sizeTomb, err := tombstones.ReadTombstones(dir)
 	if err != nil {
 		return nil, err
 	}
 	closers = append(closers, tr)
 
-	pb = &Block{
+	pb = &Block{ // 创建 Block 实例
 		dir:               dir,
 		meta:              *meta,
 		chunkr:            cr,
@@ -488,14 +515,19 @@ func (r blockChunkReader) Close() error {
 }
 
 // Delete matching series between mint and maxt in the block.
+// Delete 删除指定范围的时序数据.
+// ms: 指定待删除的时序
+// mint 和 maxt: 指定待删除的时间范围
 func (pb *Block) Delete(mint, maxt int64, ms ...*labels.Matcher) error {
 	pb.mtx.Lock()
 	defer pb.mtx.Unlock()
 
-	if pb.closing {
+	if pb.closing { // 当前 Block 已关闭
 		return ErrClosing
 	}
 
+	// 根据传入的 Matcher 集合, 从 index 文件中获取符合条件的 Postings 集合, 其中记录了时序
+	// Label 集合与时序编号(series reference) 的映射关系
 	p, err := PostingsForMatchers(pb.indexr, ms...)
 	if err != nil {
 		return errors.Wrap(err, "select series")
@@ -504,22 +536,26 @@ func (pb *Block) Delete(mint, maxt int64, ms ...*labels.Matcher) error {
 	ir := pb.indexr
 
 	// Choose only valid postings which have chunks in the time-range.
-	stones := tombstones.NewMemTombstones()
+	stones := tombstones.NewMemTombstones() // 创建 memTombstones 实例
 
 	var lset labels.Labels
 	var chks []chunks.Meta
 
 Outer:
-	for p.Next() {
+	for p.Next() { // 遍历读取到的 Postings 集合, 从 index 文件中读取时序对应的 Label 以及 Chunk 元数据
 		err := ir.Series(p.At(), &lset, &chks)
 		if err != nil {
 			return err
 		}
 
+		// 遍历当前时序中的全部 Chunk 元数据, 如果其中存在与待删除范围(mint, maxt) 重叠的
+		// chunk, 则表示该时序有需要删除的部分, 这里会将时序编号(series reference) 以及待
+		// 删除时间范围记录到 stones 中
 		for _, chk := range chks {
 			if chk.OverlapsClosedInterval(mint, maxt) {
 				// Delete only until the current values and not beyond.
 				tmin, tmax := clampInterval(mint, maxt, chks[0].MinTime, chks[len(chks)-1].MaxTime)
+				// 记录时序编号(series reference) 以及待删除的时间范围
 				stones.AddInterval(p.At(), tombstones.Interval{Mint: tmin, Maxt: tmax})
 				continue Outer
 			}
@@ -530,6 +566,8 @@ Outer:
 		return p.Err()
 	}
 
+	// 迭代 tombstones 文件中已有的 tombstone, 并将其添加到 stones 中. 注意,
+	// 同一时序的 Interval 可能会在 Intervals.Add() 方法中进行合并
 	err = pb.tombstones.Iter(func(id uint64, ivs tombstones.Intervals) error {
 		for _, iv := range ivs {
 			stones.AddInterval(id, iv)
@@ -539,14 +577,16 @@ Outer:
 	if err != nil {
 		return err
 	}
-	pb.tombstones = stones
+	pb.tombstones = stones // 更新 Block.tombstones 字段以及 BlockStats 中记录的 tombstone 个数
 	pb.meta.Stats.NumTombstones = pb.tombstones.Total()
 
+	// 将 Block.tombstone 中记录的 tombstone 数据写入 tombstones 文件中
 	n, err := tombstones.WriteFile(pb.logger, pb.dir, pb.tombstones)
 	if err != nil {
 		return err
 	}
 	pb.numBytesTombstone = n
+	// 更新对应 block 目录下的 meta.json 元数据文件
 	n, err = writeMetaFile(pb.logger, pb.dir, &pb.meta)
 	if err != nil {
 		return err
@@ -557,9 +597,11 @@ Outer:
 
 // CleanTombstones will remove the tombstones and rewrite the block (only if there are any tombstones).
 // If there was a rewrite, then it returns the ULID of the new block written, else nil.
+// CleanTombstones 清理 block 目录下已删除的时序数据
 func (pb *Block) CleanTombstones(dest string, c Compactor) (*ulid.ULID, error) {
 	numStones := 0
 
+	// 遍历全部的 tombstone, 统计 tombstone 的个数
 	if err := pb.tombstones.Iter(func(id uint64, ivs tombstones.Intervals) error {
 		numStones += len(ivs)
 		return nil
@@ -567,11 +609,12 @@ func (pb *Block) CleanTombstones(dest string, c Compactor) (*ulid.ULID, error) {
 		// This should never happen, as the iteration function only returns nil.
 		panic(err)
 	}
-	if numStones == 0 {
+	if numStones == 0 { // 没有 tombstone 时无须清理, 直接返回
 		return nil, nil
 	}
 
 	meta := pb.Meta()
+	// 通过 Compactor.Write() 方法清理已删除的数据
 	uid, err := c.Write(dest, pb, pb.meta.MinTime, pb.meta.MaxTime, &meta)
 	if err != nil {
 		return nil, err

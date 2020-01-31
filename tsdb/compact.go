@@ -39,15 +39,16 @@ import (
 )
 
 // ExponentialBlockRanges returns the time ranges based on the stepSize.
+// minSize 是该 Prometheus TSDB 中 block 目录跨域的最小时间范围, 默认是 2h(其单位是毫秒)
 func ExponentialBlockRanges(minSize int64, steps, stepSize int) []int64 {
 	ranges := make([]int64, 0, steps)
 	curRange := minSize
-	for i := 0; i < steps; i++ {
+	for i := 0; i < steps; i++ { // 计算每个层级中 block 目录所能跨越的时间范围, 每个范围递增 5 倍
 		ranges = append(ranges, curRange)
 		curRange = curRange * int64(stepSize)
 	}
 
-	return ranges
+	return ranges // 默认返回值是 [2h, 2h*5, 2h*5*5]
 }
 
 // Compactor provides compaction against an underlying storage
@@ -56,10 +57,12 @@ type Compactor interface {
 	// Plan returns a set of directories that can be compacted concurrently.
 	// The directories can be overlapping.
 	// Results returned when compactions are in progress are undefined.
-	Plan(dir string) ([]string, error)
+	Plan(dir string) ([]string, error) // 返回当前可以压缩的目录集合
 
 	// Write persists a Block into a directory.
 	// No Block is written when resulting Block has 0 samples, and returns empty ulid.ULID{}.
+	//
+	// 将传入的 Block 实例写入指定的目录中, 返回值是该 block 的唯一标识
 	Write(dest string, b BlockReader, mint, maxt int64, parent *BlockMeta) (ulid.ULID, error)
 
 	// Compact runs compaction against the provided directories. Must
@@ -70,15 +73,21 @@ type Compactor interface {
 	//  * No block is written.
 	//  * The source dirs are marked Deletable.
 	//  * Returns empty ulid.ULID{}.
+	//
+	// 将多个 block 目录(dirs 参数) 进行压缩, 压缩后的 block 目录的路径为 dest
 	Compact(dest string, dirs []string, open []*Block) (ulid.ULID, error)
 }
 
+// LeveledCompactor 会对 block 目录进行多层压缩, 每一层压缩后的 block 目录的时间跨度都有所不同,
+// 默认分为 3 个层级, 每个层级压缩后的 block 的跨度是 2h、2h*5 和 2h*5*5.
+// 压缩层级是在 Prometheus TSDB 启动时调用 ExponentialBlockRanges() 方法计算得到的.
+//
 // LeveledCompactor implements the Compactor interface.
 type LeveledCompactor struct {
 	metrics   *compactorMetrics
 	logger    log.Logger
-	ranges    []int64
-	chunkPool chunkenc.Pool
+	ranges    []int64       // 压缩层级
+	chunkPool chunkenc.Pool // 用于记录可复用的 Chunk 实例
 	ctx       context.Context
 }
 
@@ -188,8 +197,12 @@ func (c *LeveledCompactor) Plan(dir string) ([]string, error) {
 	return c.plan(dms)
 }
 
+// Prometheus TSDB 压缩操作的第一步是生成压缩计划, 即计算哪些 block 目录会参与此次的压缩操作.
+// 压缩计划是由 LeveledCompactor.plan() 生成的, 它会读取当前 Prometheus TSDB 下的全部 block
+// 目录, 并从每个 block 目录下的 meta.json 文件中加载元数据, 然后将这些元数据信息封装成 dirMeta
+// 集合交给 plan() 方法进行后续的筛选.
 func (c *LeveledCompactor) plan(dms []dirMeta) ([]string, error) {
-	sort.Slice(dms, func(i, j int) bool {
+	sort.Slice(dms, func(i, j int) bool { // 按照 MinTime 对 dirMeta 集合进行排序
 		return dms[i].meta.MinTime < dms[j].meta.MinTime
 	})
 
@@ -202,19 +215,21 @@ func (c *LeveledCompactor) plan(dms []dirMeta) ([]string, error) {
 	// This gives users a window of a full block size to piece-wise backup new data without having to care about data overlap.
 	dms = dms[:len(dms)-1]
 
-	for _, dm := range c.selectDirs(dms) {
+	for _, dm := range c.selectDirs(dms) { // 获取一组可压缩的 block 目录
 		res = append(res, dm.dir)
 	}
-	if len(res) > 0 {
+	if len(res) > 0 { // 检测是否存在可压缩的 block 目录, 若存在任意一组可压缩的 block 目录, 则从该方法返回
 		return res, nil
 	}
 
+	// 如果没有找到任何一组可压缩的 block 目录, 则查找需要删除时序数据的 block 目录
 	// Compact any blocks with big enough time range that have >5% tombstones.
 	for i := len(dms) - 1; i >= 0; i-- {
 		meta := dms[i].meta
 		if meta.MaxTime-meta.MinTime < c.ranges[len(c.ranges)/2] {
-			break
+			break // 如果前遍历到的 block 时间跨度较小, 则不进行压缩
 		}
+		// tombstone 个数达到一定阈值(包含 5%)且时间跨度较大的 block 目录才会触发此处的删除操作
 		if float64(meta.Stats.NumTombstones)/float64(meta.Stats.NumSeries+1) > 0.05 {
 			return []string{dms[i].dir}, nil
 		}
@@ -233,22 +248,30 @@ func (c *LeveledCompactor) selectDirs(ds []dirMeta) []dirMeta {
 	highTime := ds[len(ds)-1].meta.MinTime
 
 	for _, iv := range c.ranges[1:] {
+		// 获取多组可压缩的 block 目录集合
 		parts := splitByRange(ds, iv)
 		if len(parts) == 0 {
+			// 在低压缩级别中, 找不到可压缩的 block 目录组, 则继续检查下一个压缩级别,
+			// 默认是 [2h, 2h*5, 2h*5*5] 这个 3 个压缩层次
 			continue
 		}
 
 	Outer:
-		for _, p := range parts {
+		for _, p := range parts { // 遍历所有 block 分组
 			// Do not select the range if it has a block whose compaction failed.
+			// 如果当前 block 分组中存在压缩失败的 block 目录, 则跳过当前分组
 			for _, dm := range p {
 				if dm.meta.Compaction.Failed {
 					continue Outer
 				}
 			}
 
+			// 当前分组的时间范围, mint 是该组 block 中最小的 MinTime, maxt 是该组 block 中最大的 MaxTime
 			mint := p[0].meta.MinTime
 			maxt := p[len(p)-1].meta.MaxTime
+			// 满足下面任一条件, 当前分组即可被压缩
+			// 1) 当前分组已写满或当前激活的 block 不在当前分组中, 即不会有新数据写入当前分组中
+			// 2) 当前分组中有多个 block 需要压缩, 如果只有一个 block 目录, 则压缩就没意义了
 			// Pick the range of blocks if it spans the full range (potentially with gaps)
 			// or is before the most recent block.
 			// This ensures we don't compact blocks prematurely when another one of the same
@@ -300,29 +323,31 @@ func splitByRange(ds []dirMeta, tr int64) [][]dirMeta {
 			m     = ds[i].meta
 		)
 		// Compute start of aligned time range of size tr closest to the current block's start.
-		if m.MinTime >= 0 {
+		if m.MinTime >= 0 { // 对齐 MinTime 时间戳
 			t0 = tr * (m.MinTime / tr)
 		} else {
 			t0 = tr * ((m.MinTime - tr + 1) / tr)
 		}
 		// Skip blocks that don't fall into the range. This can happen via mis-alignment or
 		// by being the multiple of the intended range.
+		// 没有完全在当前 [t0, t0+tr] 范围内的 block 目录, 都不会被分配到当前分组中
 		if m.MaxTime > t0+tr {
 			i++
 			continue
 		}
 
 		// Add all dirs to the current group that are within [t0, t0+tr].
-		for ; i < len(ds); i++ {
+		// 将在 [t0, t0+tr] 区域内的 block 目录分为一组
+		for ; i < len(ds); i++ { // 注意, 因为这里循环变量使用的是 i, 所以每个 block 只能被分到一个 group
 			// Either the block falls into the next range or doesn't fit at all (checked above).
 			if ds[i].meta.MaxTime > t0+tr {
 				break
 			}
-			group = append(group, ds[i])
+			group = append(group, ds[i]) // 记录能够完全落到 group 分组内的 block 目录
 		}
 
 		if len(group) > 0 {
-			splitDirs = append(splitDirs, group)
+			splitDirs = append(splitDirs, group) // 记录所有 group 分组
 		}
 	}
 

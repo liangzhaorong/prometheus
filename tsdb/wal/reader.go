@@ -23,15 +23,17 @@ import (
 	"github.com/pkg/errors"
 )
 
+// Reader 通过其中封装的 io.Reader 实例读取数据, 而是否跨越多个 Segment 文件进行数据
+// 读取由其中封装的 io.Reader 决定.
 // Reader reads WAL records from an io.Reader.
 type Reader struct {
-	rdr       io.Reader
+	rdr       io.Reader // 底层真正读取数据的 io.Reader 实例
 	err       error
-	rec       []byte
+	rec       []byte // 读取 Reader 的缓冲区, 会被循环使用
 	snappyBuf []byte
-	buf       [pageSize]byte
-	total     int64   // Total bytes processed.
-	curRecTyp recType // Used for checking that the last record is not torn.
+	buf       [pageSize]byte // 读取 page 的缓冲区, 会被循环使用
+	total     int64          // Total bytes processed. 已读取的总字节数
+	curRecTyp recType        // Used for checking that the last record is not torn.
 }
 
 // NewReader returns a new reader.
@@ -59,23 +61,25 @@ func (r *Reader) Next() bool {
 func (r *Reader) next() (err error) {
 	// We have to use r.buf since allocating byte arrays here fails escape
 	// analysis and ends up on the heap, even though it seemingly should not.
-	hdr := r.buf[:recordHeaderSize]
-	buf := r.buf[recordHeaderSize:]
+	hdr := r.buf[:recordHeaderSize] // 用于记录 Record 的头信息
+	buf := r.buf[recordHeaderSize:] // 用于记录 Record 的数据
 
 	r.rec = r.rec[:0]
 	r.snappyBuf = r.snappyBuf[:0]
 
 	i := 0
 	for {
+		// 从当前 Segment 文件中读取第一个字节
 		if _, err = io.ReadFull(r.rdr, hdr[:1]); err != nil {
 			return errors.Wrap(err, "read first header byte")
 		}
 		r.total++
+		// Record 头信息的第一个字节是该 Record 的写入状态, 即前面写入过程中的 recType
 		r.curRecTyp = recTypeFromHeader(hdr[0])
 		compressed := hdr[0]&snappyMask != 0
 
 		// Gobble up zero bytes.
-		if r.curRecTyp == recPageTerm {
+		if r.curRecTyp == recPageTerm { // 若为 recPageTerm 类型, 则表示当前的 page 已经读取完
 			// recPageTerm is a single byte that indicates the rest of the page is padded.
 			// If it's the first byte in a page, buf is too small and
 			// needs to be resized to fit pageSize-1 bytes.
@@ -84,16 +88,18 @@ func (r *Reader) next() (err error) {
 			// We are pedantic and check whether the zeros are actually up
 			// to a page boundary.
 			// It's not strictly necessary but may catch sketchy state early.
-			k := pageSize - (r.total % pageSize)
-			if k == pageSize {
+			k := pageSize - (r.total % pageSize) // 当前 page 已读取的字节数
+			if k == pageSize {                   // 正好读取到当前 page 的最后一个字节
 				continue // Initial 0 byte was last page byte.
 			}
+			// 如果未读取到当前 page 的末尾, 则将剩余字节全部读取出来
 			n, err := io.ReadFull(r.rdr, buf[:k])
 			if err != nil {
 				return errors.Wrap(err, "read remaining zeros")
 			}
 			r.total += int64(n)
 
+			// 检测当前 page 中是否都为空字节, 如果不是, 则说明当前 page 中的数据存在异常, 会抛出异常
 			for _, c := range buf[:k] {
 				if c != 0 {
 					return errors.New("unexpected non-zero byte in padded page")
@@ -101,26 +107,27 @@ func (r *Reader) next() (err error) {
 			}
 			continue
 		}
-		n, err := io.ReadFull(r.rdr, hdr[1:])
+		n, err := io.ReadFull(r.rdr, hdr[1:]) // 读取 Record 头信息中剩余的字节
 		if err != nil {
 			return errors.Wrap(err, "read remaining header")
 		}
-		r.total += int64(n)
+		r.total += int64(n) // 统计已读取到的字节数
 
 		var (
-			length = binary.BigEndian.Uint16(hdr[1:])
-			crc    = binary.BigEndian.Uint32(hdr[3:])
+			length = binary.BigEndian.Uint16(hdr[1:]) // 从头信息中获取整个 Record 的长度
+			crc    = binary.BigEndian.Uint32(hdr[3:]) // 从头信息中获取该 Record 的 CRC32 校验码
 		)
 
 		if length > pageSize-recordHeaderSize {
 			return errors.Errorf("invalid record size %d", length)
 		}
-		n, err = io.ReadFull(r.rdr, buf[:length])
+		n, err = io.ReadFull(r.rdr, buf[:length]) // 读取当前的 Record 数据
 		if err != nil {
 			return err
 		}
-		r.total += int64(n)
+		r.total += int64(n) // 更新 total, 记录已读取到的字节数
 
+		// 检测 Record 长度以及 CRC32 校验码是否正确
 		if n != int(length) {
 			return errors.Errorf("invalid size: expected %d, got %d", length, n)
 		}
@@ -131,12 +138,13 @@ func (r *Reader) next() (err error) {
 		if compressed {
 			r.snappyBuf = append(r.snappyBuf, buf[:length]...)
 		} else {
-			r.rec = append(r.rec, buf[:length]...)
+			r.rec = append(r.rec, buf[:length]...) // 将获取的 Record 数据记录到 Recoder.rec 字段
 		}
 
 		if err := validateRecord(r.curRecTyp, i); err != nil {
 			return err
 		}
+		// 若为 recLast, 则表示多次读取后, 最终读取到一个完整的 Record
 		if r.curRecTyp == recLast || r.curRecTyp == recFull {
 			if compressed && len(r.snappyBuf) > 0 {
 				// The snappy library uses `len` to calculate if we need a new buffer.
@@ -151,7 +159,7 @@ func (r *Reader) next() (err error) {
 
 		// Only increment i for non-zero records since we use it
 		// to determine valid content record sequences.
-		i++
+		i++ // 未读取到一个完整的 Record, 则会继续进行读取
 	}
 }
 

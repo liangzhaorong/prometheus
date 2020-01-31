@@ -51,11 +51,15 @@ const (
 	indexFilename = "index"
 )
 
+// indexWriterSeries 是对 Series 部分的抽象, 可以唯一确定一条时序
 type indexWriterSeries struct {
-	labels labels.Labels
+	labels labels.Labels // 该时序关联的 Label 集合
+	// 该时序在当前 block 目录下关联的 Chunk 信息
 	chunks []chunks.Meta // series file offset of chunks
 }
 
+// indexWriterSeriesSlice 是 indexWriterSeries 的类型别名, 它实现了 sort.Interface 接口,
+// 会按照其中 indexWriterSeries 元素的 labels 字段进行排序
 type indexWriterSeriesSlice []*indexWriterSeries
 
 func (s indexWriterSeriesSlice) Len() int      { return len(s) }
@@ -105,11 +109,12 @@ func newCRC32() hash.Hash32 {
 
 // Writer implements the IndexWriter interface for the standard
 // serialization format.
+// Writer 是 IndexWriter 接口的标准实现
 type Writer struct {
 	ctx context.Context
 
 	// For the main index file.
-	f *fileWriter
+	f *fileWriter // 底层 index 文件
 
 	// Temporary file for postings.
 	fP *fileWriter
@@ -117,11 +122,15 @@ type Writer struct {
 	fPO   *fileWriter
 	cntPO uint64
 
-	toc           TOC
+	toc TOC // 关联的 TOC 实例
+	// 在写入 index 文件时需要按照 IndexWriter 接口定义的顺序执行多个步骤. indexWriterStage 是 uint8 的
+	// 类型别名, 其功能类似于一个枚举, 定义了各个步骤以及这些步骤的顺序, 依次为 idxStageNone、idxStageSymbols、
+	// idxStageSeries、idxStageDone. stage 字段就是用来控制当前 Writer 实例应该执行哪个写入操作的.
 	stage         indexWriterStage
 	postingsStart uint64 // Due to padding, can differ from TOC entry.
 
 	// Reusable memory.
+	// buf1 和 buf2 是两个可重用的缓冲区, 这两个缓冲区会相互配合, 完成 index 文件各个部分的写入
 	buf1 encoding.Encbuf
 	buf2 encoding.Encbuf
 
@@ -130,26 +139,30 @@ type Writer struct {
 	symbolFile *fileutil.MmapFile
 	lastSymbol string
 
+	// 记录每个 Label Name 及其对应的 Label Index 的起始位置
 	labelIndexes []labelIndexHashEntry // Label index offsets.
 	labelNames   map[string]uint64     // Label names, and their usage.
 
 	// Hold last series to validate that clients insert new series in order.
+	// 记录当前 index 文件中写入的最后一条时序的 Label 集合, 该字段主要在 AddSeries 方法中使用,
+	// 主要目的是保证写入的时序是有序的.
 	lastSeries labels.Labels
 	lastRef    uint64
 
-	crc32 hash.Hash
+	crc32 hash.Hash // 复用的 CRC32 循环校验码
 
-	Version int
+	Version int // 版本信息
 }
 
 // TOC represents index Table Of Content that states where each section of index starts.
+// TOC 是对 index 文件中 TOC 部分的抽象, 它记录了 index 文件中各个部分相对于文件起始位置的字节偏移量
 type TOC struct {
-	Symbols           uint64
-	Series            uint64
-	LabelIndices      uint64
-	LabelIndicesTable uint64
-	Postings          uint64
-	PostingsTable     uint64
+	Symbols           uint64 // Symbol Table 的起始位置
+	Series            uint64 // Series 部分的起始位置
+	LabelIndices      uint64 // Label Index 部分的起始位置
+	LabelIndicesTable uint64 // Label Index Table 部分的起始位置
+	Postings          uint64 // Postings 部分的起始位置
+	PostingsTable     uint64 // postings Table 部分的起始位置
 }
 
 // NewTOCFromByteSlice return parsed TOC from given index byte slice.
@@ -157,6 +170,7 @@ func NewTOCFromByteSlice(bs ByteSlice) (*TOC, error) {
 	if bs.Len() < indexTOCLen {
 		return nil, encoding.ErrInvalidSize
 	}
+	// 直接从 index 文件中获取 index TOC 部分的内容, 并保存到 Reader.b 缓冲区中
 	b := bs.Range(bs.Len()-indexTOCLen, bs.Len())
 
 	expCRC := binary.BigEndian.Uint32(b[len(b)-4:])
@@ -170,6 +184,8 @@ func NewTOCFromByteSlice(bs ByteSlice) (*TOC, error) {
 		return nil, err
 	}
 
+	// 按照 index TOC 的格式进行反序列化, 获取该 index 文件中各个部分起始位置的偏移量, 并记录到
+	// Reader.toc 字段中, 在后续读取过程中会从 toc 字段中获取对应部分的起始位置
 	return &TOC{
 		Symbols:           d.Be64(),
 		Series:            d.Be64(),
@@ -182,19 +198,20 @@ func NewTOCFromByteSlice(bs ByteSlice) (*TOC, error) {
 
 // NewWriter returns a new Writer to the given filename. It serializes data in format version 2.
 func NewWriter(ctx context.Context, fn string) (*Writer, error) {
-	dir := filepath.Dir(fn)
+	dir := filepath.Dir(fn) // 获取 index 文件的目录
 
-	df, err := fileutil.OpenDir(dir)
+	df, err := fileutil.OpenDir(dir) // 打开该目录
 	if err != nil {
 		return nil, err
 	}
-	defer df.Close() // Close for platform windows.
+	defer df.Close() // Close for platform windows. 在函数退出时关闭该文件
 
-	if err := os.RemoveAll(fn); err != nil {
+	if err := os.RemoveAll(fn); err != nil { // 删除已有的同名 index 文件
 		return nil, errors.Wrap(err, "remove any existing index at path")
 	}
 
 	// Main index file we are building.
+	// 创建 fileWriter 实例, 该实例封装了对 index 文件的操作
 	f, err := newFileWriter(fn)
 	if err != nil {
 		return nil, err
@@ -209,25 +226,26 @@ func NewWriter(ctx context.Context, fn string) (*Writer, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := df.Sync(); err != nil {
+	if err := df.Sync(); err != nil { // 将前面的文件操作更新到磁盘
 		return nil, errors.Wrap(err, "sync dir")
 	}
 
-	iw := &Writer{
+	iw := &Writer{ // 初始化 Writer
 		ctx:   ctx,
-		f:     f,
+		f:     f, // 指向封装了 index 文件的 fileWriter 实例
 		fP:    fP,
 		fPO:   fPO,
-		stage: idxStageNone,
+		stage: idxStageNone, // 初始化 stage 字段
 
 		// Reusable memory.
+		// 初始化 buf1 和 buf2 两个缓冲区
 		buf1: encoding.Encbuf{B: make([]byte, 0, 1<<22)},
 		buf2: encoding.Encbuf{B: make([]byte, 0, 1<<22)},
 
 		labelNames: make(map[string]uint64, 1<<8),
 		crc32:      newCRC32(),
 	}
-	if err := iw.writeMeta(); err != nil {
+	if err := iw.writeMeta(); err != nil { // 写入文件头, 包括 Magic 和 Version 信息
 		return nil, err
 	}
 	return iw, nil
@@ -246,20 +264,20 @@ func (w *Writer) addPadding(size int) error {
 }
 
 type fileWriter struct {
-	f    *os.File
-	fbuf *bufio.Writer
-	pos  uint64
-	name string
+	f    *os.File      // 文件句柄
+	fbuf *bufio.Writer // 向 name 文件写入数据的 bufio.Writer, 它自带缓冲区
+	pos  uint64        // 记录了当前文件已写入的字节数
+	name string        // 文件名
 }
 
 func newFileWriter(name string) (*fileWriter, error) {
-	f, err := os.OpenFile(name, os.O_CREATE|os.O_RDWR, 0666)
+	f, err := os.OpenFile(name, os.O_CREATE|os.O_RDWR, 0666) // 根据指定权限创建并打开指定文件名
 	if err != nil {
 		return nil, err
 	}
-	return &fileWriter{
+	return &fileWriter{ // 创建 fileWriter 实例
 		f:    f,
-		fbuf: bufio.NewWriterSize(f, 1<<22),
+		fbuf: bufio.NewWriterSize(f, 1<<22), // 带缓冲区的 Writer
 		pos:  0,
 		name: name,
 	}, nil
@@ -267,8 +285,8 @@ func newFileWriter(name string) (*fileWriter, error) {
 
 func (fw *fileWriter) write(bufs ...[]byte) error {
 	for _, b := range bufs {
-		n, err := fw.fbuf.Write(b)
-		fw.pos += uint64(n)
+		n, err := fw.fbuf.Write(b) // 调用 bufio.Writer.Write() 方法将 []byte 写入到 index 文件
+		fw.pos += uint64(n)        // 更新已写入的字节数
 		if err != nil {
 			return err
 		}
@@ -276,7 +294,7 @@ func (fw *fileWriter) write(bufs ...[]byte) error {
 		// offset references in v1 are only 4 bytes large.
 		// Once we move to compressed/varint representations in those areas, this limitation
 		// can be lifted.
-		if fw.pos > 16*math.MaxUint32 {
+		if fw.pos > 16*math.MaxUint32 { // 检测 index 文件的大小, 超过 64GB 则抛出异常
 			return errors.Errorf("%q exceeding max size of 64GiB", fw.name)
 		}
 	}
@@ -328,6 +346,7 @@ func (w *Writer) ensureStage(s indexWriterStage) error {
 	default:
 	}
 
+	// 检测当前 stage 字段与指定的 indexWriterStage 是否相同
 	if w.stage == s {
 		return nil
 	}
@@ -342,9 +361,9 @@ func (w *Writer) ensureStage(s indexWriterStage) error {
 	}
 
 	// Mark start of sections in table of contents.
-	switch s {
+	switch s { // 根据当前要执行的步骤, 在 TOC 中记录对应部分的起始字节偏移量
 	case idxStageSymbols:
-		w.toc.Symbols = w.f.pos
+		w.toc.Symbols = w.f.pos // 记录 Symbol Table 部分的起始位置的字节偏移量
 		if err := w.startSymbols(); err != nil {
 			return err
 		}
@@ -352,9 +371,12 @@ func (w *Writer) ensureStage(s indexWriterStage) error {
 		if err := w.finishSymbols(); err != nil {
 			return err
 		}
-		w.toc.Series = w.f.pos
+		w.toc.Series = w.f.pos // 记录 Series 部分的起始位置的字节偏移量
 
 	case idxStageDone:
+		// 完成前面的所有步骤之后, 就执行到 idxStageDone 步骤, 其中会写入 Offset Table(包括
+		// Label Index Table 和 Postings Table 两部分) 以及 TOC 的内容.
+
 		w.toc.LabelIndices = w.f.pos
 		// LabelIndices generation depends on the posting offset
 		// table produced at this stage.
@@ -389,39 +411,49 @@ func (w *Writer) ensureStage(s indexWriterStage) error {
 }
 
 func (w *Writer) writeMeta() error {
-	w.buf1.Reset()
-	w.buf1.PutBE32(MagicIndex)
+	w.buf1.Reset()             // 清空 buf1 缓冲区
+	w.buf1.PutBE32(MagicIndex) // 向 buf1 中写入 Magic 和 Version 信息, 目前默认 Version 为 2
 	w.buf1.PutByte(FormatV2)
 
-	return w.write(w.buf1.Get())
+	return w.write(w.buf1.Get()) // 将 buf1 缓冲区中的数据写入 index 文件中
 }
 
 // AddSeries adds the series one at a time along with its chunks.
+// ref: 此次写入的 Series 的下标, 表示写入的是当前 block 的第几个时序
+// lset: 此次写入时序对应的 Label 集合
+// chunks: 此次写入时序关联的 Chunk 信息, 注意, 其中的 Chunk 是有序的
 func (w *Writer) AddSeries(ref uint64, lset labels.Labels, chunks ...chunks.Meta) error {
+	// 第一次写入 Series 部分的时候, 需要调用 encureStage 方法推进 stage 状态, 并记录 Series 部分的起始偏移量
 	if err := w.ensureStage(idxStageSeries); err != nil {
 		return err
 	}
+	// 比较当前时序的 Label 集合与上一个时序的 Label 集合, 保证写入的时序信息是有序的,
+	// 如果出现乱序, 则返回异常
 	if labels.Compare(lset, w.lastSeries) <= 0 {
 		return errors.Errorf("out-of-order series added with label set %q", lset)
 	}
 
+	// 检测 ref 下标对应的时序是否已经被写入, 如果重复写入, 则会返回异常
 	if ref < w.lastRef && len(w.lastSeries) != 0 {
 		return errors.Errorf("series with reference greater than %d already added", ref)
 	}
 	// We add padding to 16 bytes to increase the addressable space we get through 4 byte
 	// series references.
+	// 添加填充字符, 保证当前写入的 Series 的起始偏移量是 16 字节对齐的
 	if err := w.addPadding(16); err != nil {
 		return errors.Errorf("failed to write padding bytes: %v", err)
 	}
 
+	// 通过 pos 字段检测当前是否为 16 字节对齐, 如果不是, 则返回异常
 	if w.f.pos%16 != 0 {
 		return errors.Errorf("series write not 16-byte aligned at %d", w.f.pos)
 	}
 
-	w.buf2.Reset()
-	w.buf2.PutUvarint(len(lset))
+	w.buf2.Reset()               // 清空 buf2 缓冲区, 开始当前 Series 的写入
+	w.buf2.PutUvarint(len(lset)) // 首先记录该时序 Label 集合的长度, 即 Label 个数
 
-	for _, l := range lset {
+	for _, l := range lset { // 遍历该时序所有的 Label, 并将其写入 buf2 缓冲区
+		// 获取 Label Name 字符串在 Symbol Table 中的下标索引, 并将其写入 buf2 缓冲区中
 		index, err := w.symbols.ReverseLookup(l.Name)
 		if err != nil {
 			return errors.Errorf("symbol entry for %q does not exist, %v", l.Name, err)
@@ -429,6 +461,7 @@ func (w *Writer) AddSeries(ref uint64, lset labels.Labels, chunks ...chunks.Meta
 		w.labelNames[l.Name]++
 		w.buf2.PutUvarint32(index)
 
+		// 获取 Label Value 字符串在 Symbol Table 中的下标索引, 并将其写入 buf2 缓冲区中
 		index, err = w.symbols.ReverseLookup(l.Value)
 		if err != nil {
 			return errors.Errorf("symbol entry for %q does not exist, %v", l.Value, err)
@@ -436,35 +469,43 @@ func (w *Writer) AddSeries(ref uint64, lset labels.Labels, chunks ...chunks.Meta
 		w.buf2.PutUvarint32(index)
 	}
 
-	w.buf2.PutUvarint(len(chunks))
+	w.buf2.PutUvarint(len(chunks)) // 写入该 Series 在当前 block 下的 Chunk 个数
 
-	if len(chunks) > 0 {
-		c := chunks[0]
-		w.buf2.PutVarint64(c.MinTime)
+	if len(chunks) > 0 { // 下面开始写入该 Series 对应 Chunk 的信息
+		c := chunks[0]                // 写入第一个 Chunk 的信息
+		w.buf2.PutVarint64(c.MinTime) // 将第一个 Chunk 的 MinTime 字段完整写入 buf2 中
+		// 计算 MaxTime 与 MinTime 的差值并写入 buf2 缓冲区中
 		w.buf2.PutUvarint64(uint64(c.MaxTime - c.MinTime))
-		w.buf2.PutUvarint64(c.Ref)
+		w.buf2.PutUvarint64(c.Ref) // 将第一个 Chunk 的 Ref 字段完整写入 buf2 中
+		// 在后续写入 Chunk 的过程中, t0 和 ref0 用于记录上一个写入的 Chunk 的 Maxtime 和 Ref 字段
 		t0 := c.MaxTime
 		ref0 := int64(c.Ref)
 
+		// 下面开始循环写入第二个及之后的 Chunk 信息
 		for _, c := range chunks[1:] {
+			// 计算当前 Chunk.MinTime 与上一个 Chunk.MaxTime 的差值, 并写入 buf2 缓冲区
 			w.buf2.PutUvarint64(uint64(c.MinTime - t0))
+			// 计算当前 Chunk.MaxTime 与其 MinTime 之间的差值, 并写入 buf2 缓冲区中
 			w.buf2.PutUvarint64(uint64(c.MaxTime - c.MinTime))
-			t0 = c.MaxTime
+			t0 = c.MaxTime // 更新 t0
 
+			// 计算当前 Chunk.Ref 与前一个 Chunk.Ref 字段的差值, 并写入 buf2 缓冲区中
 			w.buf2.PutVarint64(int64(c.Ref) - ref0)
-			ref0 = int64(c.Ref)
+			ref0 = int64(c.Ref) // 更新 ref0
 		}
 	}
 
-	w.buf1.Reset()
-	w.buf1.PutUvarint(w.buf2.Len())
+	w.buf1.Reset()                  // 清空 buf1 缓冲区
+	w.buf1.PutUvarint(w.buf2.Len()) // 将 buf2 缓冲区长度记录到 buf1 缓冲区中
 
-	w.buf2.PutHash(w.crc32)
+	w.buf2.PutHash(w.crc32) // 将 CRC32 校验码写入 buf2 缓冲区中
 
+	// 依次将 buf1 和 buf2 缓冲区写入 index 文件中
 	if err := w.write(w.buf1.Get(), w.buf2.Get()); err != nil {
 		return errors.Wrap(err, "write series data")
 	}
 
+	// 更新 lastSeries 字段, 记录该时序对应的 Label 集合
 	w.lastSeries = append(w.lastSeries[:0], lset...)
 	w.lastRef = ref
 
@@ -479,6 +520,7 @@ func (w *Writer) startSymbols() error {
 }
 
 func (w *Writer) AddSymbol(sym string) error {
+	// 推进当前所处的写入步骤
 	if err := w.ensureStage(idxStageSymbols); err != nil {
 		return err
 	}
@@ -487,9 +529,9 @@ func (w *Writer) AddSymbol(sym string) error {
 	}
 	w.lastSymbol = sym
 	w.numSymbols++
-	w.buf1.Reset()
-	w.buf1.PutUvarintStr(sym)
-	return w.write(w.buf1.Get())
+	w.buf1.Reset()               // 清空 buf1 缓冲区
+	w.buf1.PutUvarintStr(sym)    // 将 sym 写入到 buf1 中
+	return w.write(w.buf1.Get()) // 将 buf1 中的内容写入到 index 文件中
 }
 
 func (w *Writer) finishSymbols() error {
@@ -584,12 +626,16 @@ func (w *Writer) writeLabelIndices() error {
 	return nil
 }
 
+// writeLabelIndex 将每条时序中的 Label Name 以及对应的 Label Value 写入 Label Index 部分
+// name: 此次写入的 Label Name
+// values: 其中记录了所有时序中该 Label Name 对应的所有 Label Value
 func (w *Writer) writeLabelIndex(name string, values []uint32) error {
 	// Align beginning to 4 bytes for more efficient index list scans.
-	if err := w.addPadding(4); err != nil {
+	if err := w.addPadding(4); err != nil { // 为保证 4 字节对齐, 需要进行填充
 		return err
 	}
 
+	// 将 Label Name 以及对应 Label Index 的起始偏移量记录到 Writer.labelIndexes 字段中
 	w.labelIndexes = append(w.labelIndexes, labelIndexHashEntry{
 		keys:   []string{name},
 		offset: w.f.pos,
@@ -752,18 +798,18 @@ func (w *Writer) writePostingsOffsetTable() error {
 const indexTOCLen = 6*8 + crc32.Size
 
 func (w *Writer) writeTOC() error {
-	w.buf1.Reset()
+	w.buf1.Reset() // 清空 buf1 缓冲区
 
-	w.buf1.PutBE64(w.toc.Symbols)
-	w.buf1.PutBE64(w.toc.Series)
-	w.buf1.PutBE64(w.toc.LabelIndices)
-	w.buf1.PutBE64(w.toc.LabelIndicesTable)
-	w.buf1.PutBE64(w.toc.Postings)
-	w.buf1.PutBE64(w.toc.PostingsTable)
+	w.buf1.PutBE64(w.toc.Symbols)           // 写入 Symbol Table 部分的起始位置
+	w.buf1.PutBE64(w.toc.Series)            // 写入 Series 部分的起始位置
+	w.buf1.PutBE64(w.toc.LabelIndices)      // 写入 Label Index 部分的起始位置
+	w.buf1.PutBE64(w.toc.LabelIndicesTable) // 写入 Label Index Table 部分的起始位置
+	w.buf1.PutBE64(w.toc.Postings)          // 写入 Postings 部分的起始位置
+	w.buf1.PutBE64(w.toc.PostingsTable)     // 写入 Postings Table 部分的起始位置
 
-	w.buf1.PutHash(w.crc32)
+	w.buf1.PutHash(w.crc32) // 写入 CRC32 校验码
 
-	return w.write(w.buf1.Get())
+	return w.write(w.buf1.Get()) // 将 buf1 缓冲区中的数据写入 index 文件
 }
 
 func (w *Writer) writePostingsToTmpFiles() error {
@@ -926,6 +972,7 @@ func (w *Writer) writePosting(name, value string, offs []uint32) error {
 
 func (w *Writer) writePostings() error {
 	// There's padding in the tmp file, make sure it actually works.
+	// 向 index 文件中添加填充字节, 保证该Postings 的起始地址是 4 字节对齐
 	if err := w.f.addPadding(4); err != nil {
 		return err
 	}
@@ -1015,19 +1062,21 @@ type StringIter interface {
 }
 
 type Reader struct {
+	// 读取 index 文件时可服用的缓冲区. ByteSlice 是一个接口, realByteSlice 是唯一实现,
+	// 它实际上是 []byte 的类型别名
 	b   ByteSlice
-	toc *TOC
+	toc *TOC // 用于记录 index TOC 部分的读取结果
 
 	// Close that releases the underlying resources of the byte slice.
 	c io.Closer
 
 	// Map of LabelName to a list of some LabelValues's position in the offset table.
 	// The first and last values for each name are always present.
-	postings map[string][]postingOffset
+	postings map[string][]postingOffset // 用于记录 Postings Table 部分的读取结果
 	// For the v1 format, labelname -> labelvalue -> offset.
 	postingsV1 map[string]map[string]uint64
 
-	symbols     *Symbols
+	symbols     *Symbols          // 用于记录 Symbol Table 部分的读取结果
 	nameSymbols map[uint32]string // Cache of the label name symbol lookups,
 	// as there are not many and they are half of all lookups.
 
@@ -1085,13 +1134,14 @@ func NewFileReader(path string) (*Reader, error) {
 }
 
 func newReader(b ByteSlice, c io.Closer) (*Reader, error) {
-	r := &Reader{
+	r := &Reader{ // 创建 Reader 实例
 		b:        b,
 		c:        c,
 		postings: map[string][]postingOffset{},
 	}
 
 	// Verify header.
+	// 检测 index 文件的 magic 文件头以及 version 版本号
 	if r.b.Len() < HeaderLen {
 		return nil, errors.Wrap(encoding.ErrInvalidSize, "index header")
 	}
@@ -1105,6 +1155,7 @@ func newReader(b ByteSlice, c io.Closer) (*Reader, error) {
 	}
 
 	var err error
+	// 读取 Symbol Table 部分的内容
 	r.toc, err = NewTOCFromByteSlice(b)
 	if err != nil {
 		return nil, errors.Wrap(err, "read TOC")
@@ -1138,10 +1189,13 @@ func newReader(b ByteSlice, c io.Closer) (*Reader, error) {
 		valueCount := 0
 		// For the postings offset table we keep every label name but only every nth
 		// label value (plus the first and last one), to save memory.
+		// 读取 Postings Table 部分的内容
 		if err := ReadOffsetTable(r.b, r.toc.PostingsTable, func(key []string, _ uint64, off int) error {
 			if len(key) != 2 {
 				return errors.Errorf("unexpected key length for posting table %d", len(key))
 			}
+			// 每读取完 Postings Table 中的一条映射关系, 就会调用该函数, 将该映射关系记录到
+			// Reader.postings 字段中
 			if _, ok := r.postings[key[0]]; !ok {
 				// Next label name.
 				r.postings[key[0]] = []postingOffset{}
@@ -1187,7 +1241,7 @@ func newReader(b ByteSlice, c io.Closer) (*Reader, error) {
 		r.nameSymbols[off] = k
 	}
 
-	r.dec = &Decoder{LookupSymbol: r.lookupSymbol}
+	r.dec = &Decoder{LookupSymbol: r.lookupSymbol} // 初始化 dec 字段
 
 	return r, nil
 }
@@ -1247,7 +1301,7 @@ func NewSymbols(bs ByteSlice, version int, off int) (*Symbols, error) {
 		// Only happens in some tests.
 		return nil, nil
 	}
-	d := encoding.NewDecbufAt(bs, off, castagnoliTable)
+	d := encoding.NewDecbufAt(bs, off, castagnoliTable) // 从 off 位置开始读取 Symbol Table 的数据, 封装成 decbuf 实例并返回
 	var (
 		origLen = d.Len()
 		cnt     = d.Be32int()

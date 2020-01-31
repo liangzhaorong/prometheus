@@ -30,16 +30,18 @@ func (s Slice) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
 func (s Slice) Less(i, j int) bool { return Compare(s[i], s[j]) < 0 }
 
 // Selector holds constraints for matching against a label set.
+// Selector 用于表示多个 Matcher 的组合, 并且 Selector 提供了一个 Matchers() 方法用于过滤时序数据
 type Selector []*Matcher
 
 // Matches returns whether the labels satisfy all matchers.
+// Matches 检测指定 labels 是否满足所有 matchers 规则
 func (s Selector) Matches(labels Labels) bool {
-	for _, m := range s {
+	for _, m := range s { // 根据 Label Name 获取 Label Value 并使用 Matcher 进行匹配
 		if v := labels.Get(m.Name); !m.Matches(v) {
 			return false
 		}
 	}
-	return true
+	return true // 当通过全部 Matcher 的匹配后, 返回 true, 否则返回 false
 }
 
 // ReadLabels reads up to n label sets in a JSON formatted file fn. It is mostly useful

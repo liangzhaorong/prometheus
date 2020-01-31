@@ -44,16 +44,18 @@ var (
 )
 
 // RefSeries is the series labels with the series ID.
+// RefSeries 记录时序编号以及时序的 Label 集合
 type RefSeries struct {
-	Ref    uint64
-	Labels labels.Labels
+	Ref    uint64        // 时序编号
+	Labels labels.Labels // 时序中的 Label 集合
 }
 
 // RefSample is a timestamp/value pair associated with a reference to a series.
+// RefSample 记录时序点的 timestamp、value 值以及所在的时序
 type RefSample struct {
-	Ref uint64
-	T   int64
-	V   float64
+	Ref uint64  // 时序的编号
+	T   int64   // 时序点的 timestamp
+	V   float64 // 时序点的 value 值
 }
 
 // Decoder decodes series, sample, and tombstone records.
@@ -78,20 +80,22 @@ func (d *Decoder) Type(rec []byte) Type {
 func (d *Decoder) Series(rec []byte, series []RefSeries) ([]RefSeries, error) {
 	dec := encoding.Decbuf{B: rec}
 
+	// 检测传入的 []byte 所代表的 Record 类型, 如果不是 Series 类型, 则抛出异常
 	if Type(dec.Byte()) != Series {
 		return nil, errors.New("invalid record type")
 	}
 	for len(dec.B) > 0 && dec.Err() == nil {
-		ref := dec.Be64()
+		ref := dec.Be64() // 获取时序编号
 
-		lset := make(labels.Labels, dec.Uvarint())
+		lset := make(labels.Labels, dec.Uvarint()) // 获取时序中 Label 的个数
 
-		for i := range lset {
+		for i := range lset { // 获取 Label Name 和 Label Value
 			lset[i].Name = dec.UvarintStr()
 			lset[i].Value = dec.UvarintStr()
 		}
-		sort.Sort(lset)
+		sort.Sort(lset) // 对 Label 进行排序
 
+		// 将时序编号以及 Label 信息封装成 RefSeries 实例, 记录到 series 切片中
 		series = append(series, RefSeries{
 			Ref:    ref,
 			Labels: lset,
@@ -103,29 +107,30 @@ func (d *Decoder) Series(rec []byte, series []RefSeries) ([]RefSeries, error) {
 	if len(dec.B) > 0 {
 		return nil, errors.Errorf("unexpected %d bytes left in entry", len(dec.B))
 	}
-	return series, nil
+	return series, nil // 返回 series 切片
 }
 
 // Samples appends samples in rec to the given slice.
 func (d *Decoder) Samples(rec []byte, samples []RefSample) ([]RefSample, error) {
 	dec := encoding.Decbuf{B: rec}
 
+	// 检测传入的 []byte 所代表的 Record 类型, 如果不是 Samples 类型, 则抛出异常
 	if Type(dec.Byte()) != Samples {
 		return nil, errors.New("invalid record type")
 	}
 	if dec.Len() == 0 {
 		return samples, nil
 	}
-	var (
+	var ( // 该 Record 中所有点的时序引用和时间戳, 都是根据这里的 baseRef 和 baseTime 计算得到的
 		baseRef  = dec.Be64()
 		baseTime = dec.Be64int64()
 	)
 	for len(dec.B) > 0 && dec.Err() == nil {
-		dref := dec.Varint64()
-		dtime := dec.Varint64()
-		val := dec.Be64()
+		dref := dec.Varint64()  // 获取时序引用的偏移量
+		dtime := dec.Varint64() // 获取点的时间戳的偏移量
+		val := dec.Be64()       // 获取点的 value 值
 
-		samples = append(samples, RefSample{
+		samples = append(samples, RefSample{ // 创建 RefSample 实例并将其添加到 samples 切片中
 			Ref: uint64(int64(baseRef) + dref),
 			T:   baseTime + dtime,
 			V:   math.Float64frombits(val),
@@ -138,17 +143,19 @@ func (d *Decoder) Samples(rec []byte, samples []RefSample) ([]RefSample, error) 
 	if len(dec.B) > 0 {
 		return nil, errors.Errorf("unexpected %d bytes left in entry", len(dec.B))
 	}
-	return samples, nil
+	return samples, nil // 返回 samples 切片
 }
 
 // Tombstones appends tombstones in rec to the given slice.
 func (d *Decoder) Tombstones(rec []byte, tstones []tombstones.Stone) ([]tombstones.Stone, error) {
 	dec := encoding.Decbuf{B: rec}
 
+	// 检测传入的 []byte 所代表的 Record 类型, 如果不是 Tombstones 类型, 则抛出异常
 	if Type(dec.Byte()) != Tombstones {
 		return nil, errors.New("invalid record type")
 	}
 	for dec.Len() > 0 && dec.Err() == nil {
+		// 创建 tombstones.Stone 实例并将其添加到 tstones 切片中
 		tstones = append(tstones, tombstones.Stone{
 			Ref: dec.Be64(),
 			Intervals: tombstones.Intervals{
@@ -162,7 +169,7 @@ func (d *Decoder) Tombstones(rec []byte, tstones []tombstones.Stone) ([]tombston
 	if len(dec.B) > 0 {
 		return nil, errors.Errorf("unexpected %d bytes left in entry", len(dec.B))
 	}
-	return tstones, nil
+	return tstones, nil // 返回 tstones 切片
 }
 
 // Encoder encodes series, sample, and tombstones records.
