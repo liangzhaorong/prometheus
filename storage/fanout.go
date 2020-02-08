@@ -29,8 +29,8 @@ import (
 type fanout struct {
 	logger log.Logger
 
-	primary     Storage
-	secondaries []Storage
+	primary     Storage   // 本地存储
+	secondaries []Storage // 多个远端存储
 }
 
 // NewFanout returns a new fan-out Storage, which proxies reads and writes

@@ -392,11 +392,14 @@ Prometheus.Graph.prototype.decreaseRange = function() {
   }
 };
 
+// Web Graph 区域显示的指标趋势图是根据 GMT 时间绘制的, 所以应修改成本地时间
 Prometheus.Graph.prototype.getEndDate = function() {
   var self = this;
   if (!self.endDate || !self.endDate.val()) {
     return moment();
   }
+  // 更该为从本地系统时间中获取
+  // return self.endDate.data('DateTimePicker').getLocalDate().getTime();
   return self.endDate.data('DateTimePicker').date();
 };
 
@@ -757,6 +760,8 @@ Prometheus.Graph.prototype.updateGraph = function() {
   var hoverDetail = new Rickshaw.Graph.HoverDetail({
     graph: self.rickshawGraph,
     formatter: function(series, x, y) {
+      // 更改为本地时间显示
+      // var date = '<span class="date">' + new Date(x * 1000).toString() + '</span>';
       var date = '<span class="date">' + new Date(x * 1000).toUTCString() + '</span>';
       var swatch = '<span class="detail_swatch" style="background-color: ' + series.color + '"></span>';
       var content = swatch + (series.labels.__name__ || 'value') + ": <strong>" + y + '</strong>';

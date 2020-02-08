@@ -85,8 +85,15 @@ func init() {
 }
 
 func main() {
+	// Prothemus 进入调试模式, 需设置环境变量 DEBUG(重启 Prometheus 服务后生效)
 	if os.Getenv("DEBUG") != "" {
+		// Prometheus 使用 pprof对自身的性能数据进行采集和监控
+		// 通过访问 http://localhost:9090/debug/pprof, 可以获取 Prometheus 具体的性能数据,
+		// 如 block、goroutine、heap 等
+
+		// SetBlockProfileRate 用于设置 goroutine 阻塞分析器的采样频率
 		runtime.SetBlockProfileRate(20)
+		// SetMutexProfileFraction 用于设置 goroutine 互斥锁竞争的采样频率
 		runtime.SetMutexProfileFraction(20)
 	}
 
@@ -334,23 +341,58 @@ func main() {
 	level.Info(logger).Log("vm_limits", prom_runtime.VmLimits())
 
 	var (
+		// Prometheus 对指标的存储采用的是时序数据库, localStorage 与 remoteStorage 在初始化时
+		// 需要使用相同的时间基线(localStorage.StartTime)存储指标
+		// 指标的存储周期默认为 15d, 可通过 Prometheus 命令行参数 --storage.tsdb.retention=15d 进行个性化设置.
+		// localStorage 用于指标的本地存储; remoteStorage 用于指标的远程存储;
+		// fanoutStorage 为 localStorage 与 remoteStorage 的读写代理器, 且 remoteStorage 可以有多个传入
 		localStorage  = &tsdb.ReadyStorage{}
 		remoteStorage = remote.NewStorage(log.With(logger, "component", "remote"), prometheus.DefaultRegisterer, localStorage.StartTime, cfg.localStoragePath, time.Duration(cfg.RemoteFlushDeadline))
 		fanoutStorage = storage.NewFanout(logger, localStorage, remoteStorage)
 	)
 
 	var (
+		// ctxWeb 用于跟踪控制对应的 goroutine
+		// cancelWeb 用于结束对应的 goroutine
 		ctxWeb, cancelWeb = context.WithCancel(context.Background())
 		ctxRule           = context.Background()
 
+		// notifier 组件用于告警通知, 在完成初始化后, notifier 组件内部会构建一个告警通知队列, 队列的大小
+		// 由命令行参数 --alertmanager.notification-queue-capacity 确定, 默认值为 10000, 且告警信息通过
+		// sendAlerts 方法发送给 AlertManager.
+		// notifier 组件的构建通过调用 notifier.NewManager 方法完成, cfg.notifier 为 notifier 组件的配置
+		// 信息, 调用 log.With 方法返回的 logger 用于记录系统日志
 		notifierManager = notifier.NewManager(&cfg.notifier, log.With(logger, "component", "notifier"))
 
+		// discoveryManagerScrape 组件用于发现指标采集服务, 对应 prometheus.yml 配置文件中 scrape_configs
+		// 节点下的各种指标采集器(static_config、kubernetes_sd_config、openstack_sd_config、consul_sd_config 等)
+		// discoveryManagerScrape 组件的构建通过调用 discovery.NewManager 方法完成, logger 参数用于记录系统日志
 		ctxScrape, cancelScrape = context.WithCancel(context.Background())
 		discoveryManagerScrape  = discovery.NewManager(ctxScrape, log.With(logger, "component", "discovery manager scrape"), discovery.Name("scrape"))
 
+		// discoveryManagerScrape 组件用于发现告警通知服务, 与 prometheus.yml 配置文件中的 alerting 标签
+		// 相关联
+		// AlterManager 的 URL 地址在 Prometheus 的 1.x 版本中通过 Prometheus 启动命令行参数 -alertmanager.url
+		// 指定, 到 Prometheus 的 2.x 版本后通过 prometheus.yml 指定, 格式如下:
+		//   alerting:
+		//     alertmanagers:
+		//       static_configs:
+		//       - targets:
+		//         - "localhost:9093"
+		// discoveryManagerNotify 组件的构建与 discoveryManagerScrape 组件的构建方式一样, 不同的是前者服务
+		// 与 notify, 后者服务于 scrape
 		ctxNotify, cancelNotify = context.WithCancel(context.Background())
 		discoveryManagerNotify  = discovery.NewManager(ctxNotify, log.With(logger, "component", "discovery manager notify"), discovery.Name("notify"))
 
+		// scrapeManager 组件用于管理对指标的采集, 并将所采集的指标存储到 fanoutStorage 中.
+		//
+		// scrapeManager 组件的采集周期在 prometheus.yml 配置文件中由 global 节点下的 scrape_interval 指定,
+		// 且各个 job_name 可以在 scrape_configs 下进行个性化设置, 设置符合自身应用场景的 scrape_interval.
+		//
+		// prometheus.yml 配置文件中 global 下的 scrape_interval 作用域为全局, 所有 job_name 共用.
+		// 在 scrape_configs 下 job_name 中所配置的 scrape_interval 作用域仅限所描述的 job_name.
+		//
+		// scrapeManager 组件的构建调用 scrape.NewManager 方法完成, logger 参数用于记录系统日志
 		scrapeManager = scrape.NewManager(log.With(logger, "component", "scrape manager"), fanoutStorage)
 
 		opts = promql.EngineOpts{
@@ -362,23 +404,36 @@ func main() {
 			ActiveQueryTracker: promql.NewActiveQueryTracker(cfg.localStoragePath, cfg.queryConcurrency, log.With(logger, "component", "activeQueryTracker")),
 		}
 
+		// queryEngine 组件为规则查询计算引擎, 在初始化时会对查询超时时间(cfg.queryTimeout)和并发查询个数
+		// (cfg.queryConcurrency) 进行设置
+		//
+		// queryEngine 组件的构建调用 promql.NewEngine 方法完成
 		queryEngine = promql.NewEngine(opts)
 
+		// ruleManager 组件整合了 fanoutStorage 组件、queryEngine 组件和 notifier 组件, 完成
+		// 了从规则运算到告警发送的流程.
+		//
+		// 规则运算周期在 prometheus.yml 配置文件中由 global 节点下的 evaluation_interval 指定,
+		// 各个 job_name 还可以在 scrape_configs 下进行个性化设置, 设置符合自身应用场景的规则
+		// 运算周期(evaluation_interval).
+		//
+		// ruleManager 组件的构建调用 rules.NewManager 方法完成
 		ruleManager = rules.NewManager(&rules.ManagerOptions{
-			Appendable:      fanoutStorage,
+			Appendable:      fanoutStorage, // 存储器
 			TSDB:            localStorage,
-			QueryFunc:       rules.EngineQueryFunc(queryEngine, fanoutStorage),
-			NotifyFunc:      sendAlerts(notifierManager, cfg.web.ExternalURL.String()),
-			Context:         ctxRule,
-			ExternalURL:     cfg.web.ExternalURL,
-			Registerer:      prometheus.DefaultRegisterer,
-			Logger:          log.With(logger, "component", "rule manager"),
+			QueryFunc:       rules.EngineQueryFunc(queryEngine, fanoutStorage),         // 规则计算
+			NotifyFunc:      sendAlerts(notifierManager, cfg.web.ExternalURL.String()), // 告警通知
+			Context:         ctxRule,                                                   // 控制 ruleManager 组件中的 goroutine
+			ExternalURL:     cfg.web.ExternalURL,                                       // Web 访问地址
+			Registerer:      prometheus.DefaultRegisterer,                              // 系统指标注册器
+			Logger:          log.With(logger, "component", "rule manager"),             // 系统日志记录
 			OutageTolerance: time.Duration(cfg.outageTolerance),
 			ForGracePeriod:  time.Duration(cfg.forGracePeriod),
 			ResendDelay:     time.Duration(cfg.resendDelay),
 		})
 	)
 
+	// Web 组件的初始化
 	cfg.web.Context = ctxWeb
 	cfg.web.TSDB = localStorage.Get
 	cfg.web.Storage = fanoutStorage
@@ -388,6 +443,7 @@ func main() {
 	cfg.web.Notifier = notifierManager
 	cfg.web.TSDBCfg = cfg.tsdb
 
+	// 用于记录 Prometheus 的版本信息, 查看地址为 http://localhost:9090/status
 	cfg.web.Version = &web.PrometheusVersion{
 		Version:   version.Version,
 		Revision:  version.Revision,
@@ -397,6 +453,7 @@ func main() {
 		GoVersion: version.GoVersion,
 	}
 
+	// 用于记录命令行配置信息, 查看地址为 http://localhost:9090/flags
 	cfg.web.Flags = map[string]string{}
 
 	// Exclude kingpin default flags to expose only Prometheus ones.
@@ -409,6 +466,7 @@ func main() {
 		cfg.web.Flags[f.Name] = f.Value.String()
 	}
 
+	// 构建 Web 组件, logger 参数用于记录系统日志, cfg.web 中记录了 Prometheus 的版本、配置及编译信息等
 	// Depends on cfg.web.ScrapeManager so needs to be after cfg.web.ScrapeManager = scrapeManager.
 	webHandler := web.New(log.With(logger, "component", "web"), &cfg.web)
 
@@ -417,12 +475,14 @@ func main() {
 		conntrack.DialWithTracing(),
 	)
 
+	// 组件配置管理就是将相关组件的配置加载过程统一为 ApplyConfig 方法, 并储存到 reloaders 中进行统一调用
 	reloaders := []func(cfg *config.Config) error{
 		remoteStorage.ApplyConfig,
 		webHandler.ApplyConfig,
 		// The Scrape and notifier managers need to reload before the Discovery manager as
 		// they need to read the most updated config when receiving the new targets list.
 		scrapeManager.ApplyConfig,
+		// discoveryManagerScrape 配置加载
 		func(cfg *config.Config) error {
 			c := make(map[string]sd_config.ServiceDiscoveryConfig)
 			for _, v := range cfg.ScrapeConfigs {
@@ -431,6 +491,7 @@ func main() {
 			return discoveryManagerScrape.ApplyConfig(c)
 		},
 		notifierManager.ApplyConfig,
+		// discoveryManagerNotify 配置加载
 		func(cfg *config.Config) error {
 			c := make(map[string]sd_config.ServiceDiscoveryConfig)
 			for k, v := range cfg.AlertingConfig.AlertmanagerConfigs.ToMap() {
@@ -438,9 +499,11 @@ func main() {
 			}
 			return discoveryManagerNotify.ApplyConfig(c)
 		},
+		// 将 ruleManager 内置更新方法 Update 转换为 ApplyConfig 类型如下
 		func(cfg *config.Config) error {
 			// Get all rule files matching the configuration paths.
 			var files []string
+			// 遍历规则文件
 			for _, pat := range cfg.RuleFiles {
 				fs, err := filepath.Glob(pat)
 				if err != nil {
@@ -449,6 +512,8 @@ func main() {
 				}
 				files = append(files, fs...)
 			}
+			// 规则管理器(ruleManager)内置的配置更新方法为 ruleManager.Update.
+			// 该方法用于更新查询引擎所计算的记录规则、告警规则及计算周期.
 			return ruleManager.Update(
 				time.Duration(cfg.GlobalConfig.EvaluationInterval),
 				files,
@@ -480,12 +545,17 @@ func main() {
 		})
 	}
 
+	// Prometheus 各服务组件的启动流程由 10 次 group 的 Add 方法调用链构成
 	var g run.Group
 	{
 		// Termination handler.
 		term := make(chan os.Signal, 1)
 		signal.Notify(term, os.Interrupt, syscall.SIGTERM)
 		cancel := make(chan struct{})
+		// 用于控制 Prometheus 程序的退出. 当满足以下任一条件时将退出:
+		// - Prometheus 接收到 SIGTERM 系统信号;
+		// - Prometheus 程序设置了 --web.enable-lifecycle 参数来启动且接收到
+		//   "curl -X POST localhost:9090/-/quit" 请求
 		g.Add(
 			func() error {
 				// Don't forget to release the reloadReady channel so that waiting blocks can exit normally.
@@ -507,6 +577,7 @@ func main() {
 	}
 	{
 		// Scrape discovery manager.
+		// 用于启动 DiscoveryManagerScrape 服务
 		g.Add(
 			func() error {
 				err := discoveryManagerScrape.Run()
@@ -521,6 +592,7 @@ func main() {
 	}
 	{
 		// Notify discovery manager.
+		// 用于启动 discoveryManagerNotify 服务
 		g.Add(
 			func() error {
 				err := discoveryManagerNotify.Run()
@@ -534,6 +606,7 @@ func main() {
 		)
 	}
 	{
+		// 根据在第 2 个 Add 中 discoveryManagerScrape 发现的 scrape 服务启动且采集指标数据
 		// Scrape manager.
 		g.Add(
 			func() error {
@@ -563,6 +636,9 @@ func main() {
 		hup := make(chan os.Signal, 1)
 		signal.Notify(hup, syscall.SIGHUP)
 		cancel := make(chan struct{})
+		// 用于系统配置的热加载, reloadConfig 方法用于加载系统配置文件, 且当 Prometheus 进程收到 SIGHUP 信号
+		// 或者收到 "curl -X POST localhost:9090/-/reload" 请求(Prometheus 启动参数 --web.enable-lifecycle)
+		// 时, reloadConfig 方法会被调用
 		g.Add(
 			func() error {
 				<-reloadReady.C
@@ -594,6 +670,7 @@ func main() {
 		)
 	}
 	{
+		// 用于初始化系统配置的参数和设置 Web 可用的服务状态
 		// Initial configuration loading.
 		cancel := make(chan struct{})
 		g.Add(
@@ -624,6 +701,7 @@ func main() {
 		)
 	}
 	{
+		// 启动规则管理组件 ruleManager
 		// Rule manager.
 		// TODO(krasi) refactor ruleManager.Run() to be blocking to avoid using an extra blocking channel.
 		cancel := make(chan struct{})
@@ -641,6 +719,8 @@ func main() {
 		)
 	}
 	{
+		// 启动存储组件, Prometheus 指标的存储采用的是时序数据库, 所以在初始化启动
+		// 时会设置开始时间和存储路径.
 		// TSDB.
 		cancel := make(chan struct{})
 		g.Add(
@@ -688,6 +768,7 @@ func main() {
 		)
 	}
 	{
+		// 启动 Web 服务组件
 		// Web handler.
 		g.Add(
 			func() error {
@@ -706,7 +787,7 @@ func main() {
 
 		// Calling notifier.Stop() before ruleManager.Stop() will cause a panic if the ruleManager isn't running,
 		// so keep this interrupt after the ruleManager.Stop().
-		g.Add(
+		g.Add( // 根据在 discoveryManagerNotify 发现的 AlertManager 启动 notifier 组件服务
 			func() error {
 				// When the notifier manager receives a new targets list
 				// it needs to read a valid config for each job.
@@ -723,6 +804,9 @@ func main() {
 			},
 		)
 	}
+	// 在完成各组件服务启动方法的添加后, 调用 Run() 方法运行
+	// execute 方法在 Run 方法中先被执行, 当 execute 方法在执行过程中出现错误或者退出时,
+	// interrupt 方法将被触发执行, 且加入 actors 中的所有 interrupt 方法都将被触发.
 	if err := g.Run(); err != nil {
 		level.Error(logger).Log("err", err)
 		os.Exit(1)

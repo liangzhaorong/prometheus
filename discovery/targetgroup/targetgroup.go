@@ -20,16 +20,17 @@ import (
 	"github.com/prometheus/common/model"
 )
 
+// Ptometheus 将所发现的服务都转换为 targetgroup.Group 结构, 通过 up 发送给 ScrapeManager, 完成服务上线
 // Group is a set of targets with a common label set(production , test, staging etc.).
 type Group struct {
 	// Targets is a list of targets identified by a label set. Each target is
 	// uniquely identifiable in the group by its address label.
-	Targets []model.LabelSet
+	Targets []model.LabelSet // 目标服务地址, 通常为 URL
 	// Labels is a set of labels that is common across all targets in the group.
-	Labels model.LabelSet
+	Labels model.LabelSet // 标签信息
 
 	// Source is an identifier that describes a group of targets.
-	Source string
+	Source string // 以 ZooKeeper 为例, 为路径信息
 }
 
 func (tg Group) String() string {

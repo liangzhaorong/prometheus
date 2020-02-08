@@ -50,17 +50,22 @@ type Queryable interface {
 }
 
 // Querier provides reading access to time series data.
+// Querier 监控数据的查询接口
 type Querier interface {
 	// Select returns a set of series that matches the given label matchers.
+	// 根据标签查询对应的时序数据
 	Select(*SelectParams, ...*labels.Matcher) (SeriesSet, Warnings, error)
 
 	// LabelValues returns all potential values for a label name.
+	// 根据标签名称查询标签的值
 	LabelValues(name string) ([]string, Warnings, error)
 
 	// LabelNames returns all the unique label names present in the block in sorted order.
+	// 返回所有标签名
 	LabelNames() ([]string, Warnings, error)
 
 	// Close releases the resources of the Querier.
+	// 关闭查询请求
 	Close() error
 }
 
@@ -87,14 +92,22 @@ func (f QueryableFunc) Querier(ctx context.Context, mint, maxt int64) (Querier, 
 }
 
 // Appender provides batched appends against a storage.
+// Appender 数据写入接口
 type Appender interface {
+	// 将给定的样本数据添加到对应的序列中, 并返回索引
+	// Add 方法需要根据传入的标签通过 Hash 算法找到(如果不存在则创建)序列 ID,
+	// 然后将样本值保存到序列中.
 	Add(l labels.Labels, t int64, v float64) (uint64, error)
 
+	// 通过给定的索引快速添加指标
+	// AddFast 方法则直接传入序列 ID, 省去了进行序列查找或者序列 ID 生成的步骤
 	AddFast(l labels.Labels, ref uint64, t int64, v float64) error
 
 	// Commit submits the collected samples and purges the batch.
+	// 批量提交, 用于提交多个 Add 方法或将 AddFast 方法的结果持久化(如保存到 WAL 中)
 	Commit() error
 
+	// 回滚
 	Rollback() error
 }
 

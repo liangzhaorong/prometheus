@@ -155,7 +155,9 @@ type Writer struct {
 }
 
 // TOC represents index Table Of Content that states where each section of index starts.
-// TOC 是对 index 文件中 TOC 部分的抽象, 它记录了 index 文件中各个部分相对于文件起始位置的字节偏移量
+// TOC 是对 index 文件中 TOC 部分的抽象, 它记录了 index 文件中各个部分相对于文件起始位置的字节偏移量.
+// TOC 表. TOC 表是 index 的入口, 记录 index 文件中其他表的位置. 在写入其他表的数据之前都会先将当前
+// 的偏移量(8 字节)作为该表的地址记录, 在读取 index 时首先读取的是 TOC 表.
 type TOC struct {
 	Symbols           uint64 // Symbol Table 的起始位置
 	Series            uint64 // Series 部分的起始位置
@@ -1279,6 +1281,7 @@ func (r *Reader) PostingsRanges() (map[labels.Label]Range, error) {
 	return m, nil
 }
 
+// 符号表(Symbol Table). TSDB 为了避免标签重复存储, 对每个标签只存储一次, 在使用标签时直接使用符号表中的索引
 type Symbols struct {
 	bs      ByteSlice
 	version int

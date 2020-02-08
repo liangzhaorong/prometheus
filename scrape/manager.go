@@ -56,14 +56,14 @@ func NewManager(logger log.Logger, app Appendable) *Manager {
 // Manager maintains a set of scrape pools and manages start/stop cycles
 // when receiving new target groups form the discovery manager.
 type Manager struct {
-	logger    log.Logger
-	append    Appendable
-	graceShut chan struct{}
+	logger    log.Logger    // 系统日志记录
+	append    Appendable    // 指标存储器
+	graceShut chan struct{} // ScrapeManager 关闭控制
 
-	jitterSeed    uint64     // Global jitterSeed seed is used to spread scrape workload across HA setup.
-	mtxScrape     sync.Mutex // Guards the fields below.
-	scrapeConfigs map[string]*config.ScrapeConfig
-	scrapePools   map[string]*scrapePool
+	jitterSeed    uint64                          // Global jitterSeed seed is used to spread scrape workload across HA setup.
+	mtxScrape     sync.Mutex                      // Guards the fields below.
+	scrapeConfigs map[string]*config.ScrapeConfig // [job_name][scrape 配置]
+	scrapePools   map[string]*scrapePool          // [job_name][指标采集器]
 	targetSets    map[string][]*targetgroup.Group
 
 	triggerReload chan struct{}

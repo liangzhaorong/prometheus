@@ -90,6 +90,8 @@ func init() {
 // It does guarantee that it sends the new TargetGroup whenever a change happens.
 //
 // Discoverers should initially send a full set of all discoverable TargetGroups.
+//
+// Prometheus 对所支持的发现服务都抽象出 Discoverer 接口, 各 scrape 发现服务都必须实现该接口并用于服务发现
 type Discoverer interface {
 	// Run hands a channel to the discovery provider (Consul, DNS etc) through which it can send
 	// updated target groups.
@@ -140,22 +142,23 @@ func Name(n string) func(*Manager) {
 	}
 }
 
+// 服务发现管理者(Manager) 是所有发现服务的入口, 在服务上线、下线和更新时都需要进行服务同步
 // Manager maintains a set of discovery providers and sends each update to a map channel.
 // Targets are grouped by the target set name.
 type Manager struct {
-	logger         log.Logger
+	logger         log.Logger // 系统日志记录
 	name           string
-	mtx            sync.RWMutex
-	ctx            context.Context
-	discoverCancel []context.CancelFunc
+	mtx            sync.RWMutex         // 同步读写锁
+	ctx            context.Context      // 协同控制
+	discoverCancel []context.CancelFunc // 服务下线通知
 
 	// Some Discoverers(eg. k8s) send only the updates for a given target group
 	// so we use map[tg.Source]*targetgroup.Group to know which group to update.
-	targets map[poolKey]map[string]*targetgroup.Group
+	targets map[poolKey]map[string]*targetgroup.Group // 发现目标服务
 	// providers keeps track of SD providers.
 	providers []*provider
 	// The sync channel sends the updates as a map where the key is the job value from the scrape config.
-	syncCh chan map[string][]*targetgroup.Group
+	syncCh chan map[string][]*targetgroup.Group // 将所发现的目标服务以 chan 的方法通知接受方
 
 	// How long to wait before sending updates to the channel. The variable
 	// should only be modified in unit tests.
@@ -180,7 +183,9 @@ func (m *Manager) SyncCh() <-chan map[string][]*targetgroup.Group {
 	return m.syncCh
 }
 
+// Ptometheus 在初始化过程中会构建 discoveryManagerScrape, 并通过调用 ApplyConfig 方法完成对 Discovery 的构建
 // ApplyConfig removes all running discovery providers and starts new ones using the provided config.
+// ApplyConfig 加载服务发现配置
 func (m *Manager) ApplyConfig(cfg map[string]sd_config.ServiceDiscoveryConfig) error {
 	m.mtx.Lock()
 	defer m.mtx.Unlock()
@@ -190,19 +195,19 @@ func (m *Manager) ApplyConfig(cfg map[string]sd_config.ServiceDiscoveryConfig) e
 			discoveredTargets.DeleteLabelValues(m.name, pk.setName)
 		}
 	}
-	m.cancelDiscoverers()
+	m.cancelDiscoverers() // 取消所有 Discoverer
 	m.targets = make(map[poolKey]map[string]*targetgroup.Group)
 	m.providers = nil
 	m.discoverCancel = nil
 
 	failedCount := 0
-	for name, scfg := range cfg {
-		failedCount += m.registerProviders(scfg, name)
+	for name, scfg := range cfg { // 遍历 Discoverer 配置
+		failedCount += m.registerProviders(scfg, name) // 根据 scfg 构建 Discoverer 实例
 		discoveredTargets.WithLabelValues(m.name, name).Set(0)
 	}
 	failedConfigs.WithLabelValues(m.name).Set(float64(failedCount))
 
-	for _, prov := range m.providers {
+	for _, prov := range m.providers { // 启动服务
 		m.startProvider(m.ctx, prov)
 	}
 
@@ -220,15 +225,16 @@ func (m *Manager) StartCustomProvider(ctx context.Context, name string, worker D
 	m.startProvider(ctx, p)
 }
 
+// startProvider 启动 Discoverer 服务
 func (m *Manager) startProvider(ctx context.Context, p *provider) {
 	level.Debug(m.logger).Log("msg", "Starting provider", "provider", p.name, "subs", fmt.Sprintf("%v", p.subs))
 	ctx, cancel := context.WithCancel(ctx)
-	updates := make(chan []*targetgroup.Group)
+	updates := make(chan []*targetgroup.Group) // 存储刷新的服务
 
-	m.discoverCancel = append(m.discoverCancel, cancel)
+	m.discoverCancel = append(m.discoverCancel, cancel) // 添加取消的方法
 
-	go p.d.Run(ctx, updates)
-	go m.updater(ctx, p, updates)
+	go p.d.Run(ctx, updates)      // 启动具体的发现服务(如 DNS Discovery)
+	go m.updater(ctx, p, updates) // 同步更新所发现的服务
 }
 
 func (m *Manager) updater(ctx context.Context, p *provider, updates chan []*targetgroup.Group) {
@@ -236,7 +242,7 @@ func (m *Manager) updater(ctx context.Context, p *provider, updates chan []*targ
 		select {
 		case <-ctx.Done():
 			return
-		case tgs, ok := <-updates:
+		case tgs, ok := <-updates: // 更新目标服务信号
 			receivedUpdates.WithLabelValues(m.name).Inc()
 			if !ok {
 				level.Debug(m.logger).Log("msg", "discoverer channel closed", "provider", p.name)
@@ -289,12 +295,15 @@ func (m *Manager) cancelDiscoverers() {
 	}
 }
 
+// updateGroup 更新目标服务列表
 func (m *Manager) updateGroup(poolKey poolKey, tgs []*targetgroup.Group) {
 	m.mtx.Lock()
 	defer m.mtx.Unlock()
 
+	// 更新 targets 列表
 	for _, tg := range tgs {
 		if tg != nil { // Some Discoverers send nil target group so need to check for it to avoid panics.
+			// 如果所发现的新服务不在 targets 中, 就申请新的存储单元, 然后更新目标服务的内容(targets 列表)
 			if _, ok := m.targets[poolKey]; !ok {
 				m.targets[poolKey] = make(map[string]*targetgroup.Group)
 			}
@@ -303,16 +312,19 @@ func (m *Manager) updateGroup(poolKey poolKey, tgs []*targetgroup.Group) {
 	}
 }
 
+//allGroups 构架服务快照
 func (m *Manager) allGroups() map[string][]*targetgroup.Group {
 	m.mtx.Lock()
 	defer m.mtx.Unlock()
 
+	// 快照存储
 	tSets := map[string][]*targetgroup.Group{}
 	for pkey, tsets := range m.targets {
 		var n int
 		for _, tg := range tsets {
 			// Even if the target group 'tg' is empty we still need to send it to the 'Scrape manager'
 			// to signal that it needs to stop all scrape loops for this target set.
+			// 通过 append 添加目标服务是对目标服务的复制
 			tSets[pkey.setName] = append(tSets[pkey.setName], tg)
 			n += len(tg.Targets)
 		}
@@ -354,6 +366,7 @@ func (m *Manager) registerProviders(cfg sd_config.ServiceDiscoveryConfig, setNam
 		added = true
 	}
 
+	// 构建 DNS 的 Discoverer 实例
 	for _, c := range cfg.DNSSDConfigs {
 		add(c, func() (Discoverer, error) {
 			return dns.NewDiscovery(*c, log.With(m.logger, "discovery", "dns")), nil

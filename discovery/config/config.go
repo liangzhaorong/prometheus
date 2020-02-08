@@ -33,30 +33,43 @@ import (
 // ServiceDiscoveryConfig configures lists of different service discovery mechanisms.
 type ServiceDiscoveryConfig struct {
 	// List of labeled target groups for this job.
+	// 静态服务配置
 	StaticConfigs []*targetgroup.Group `yaml:"static_configs,omitempty"`
 	// List of DNS service discovery configurations.
+	// 以 DNS 域名的方式发现服务
 	DNSSDConfigs []*dns.SDConfig `yaml:"dns_sd_configs,omitempty"`
 	// List of file service discovery configurations.
+	// 从配置文件中发现服务, 文件格式只支持 YAML 和 JSON
 	FileSDConfigs []*file.SDConfig `yaml:"file_sd_configs,omitempty"`
 	// List of Consul service discovery configurations.
+	// 从 Consul 中发现服务
 	ConsulSDConfigs []*consul.SDConfig `yaml:"consul_sd_configs,omitempty"`
 	// List of Serverset service discovery configurations.
+	// 从 Zookeeper 中发现 Serverset 服务
 	ServersetSDConfigs []*zookeeper.ServersetSDConfig `yaml:"serverset_sd_configs,omitempty"`
 	// NerveSDConfigs is a list of Nerve service discovery configurations.
+	// 从 Zookeeper 中发现 Nerve 服务
 	NerveSDConfigs []*zookeeper.NerveSDConfig `yaml:"nerve_sd_configs,omitempty"`
 	// MarathonSDConfigs is a list of Marathon service discovery configurations.
+	// 根据 Marathon REST API 发现 Marathon 服务
 	MarathonSDConfigs []*marathon.SDConfig `yaml:"marathon_sd_configs,omitempty"`
 	// List of Kubernetes service discovery configurations.
+	// 根据 Kubernetes REST API 发现 Kubernetes 服务
 	KubernetesSDConfigs []*kubernetes.SDConfig `yaml:"kubernetes_sd_configs,omitempty"`
 	// List of GCE service discovery configurations.
+	// 从 GCP GCE 中发现服务
 	GCESDConfigs []*gce.SDConfig `yaml:"gce_sd_configs,omitempty"`
 	// List of EC2 service discovery configurations.
+	// 从 AWS EC2 中发现服务
 	EC2SDConfigs []*ec2.SDConfig `yaml:"ec2_sd_configs,omitempty"`
 	// List of OpenStack service discovery configurations.
+	// 发现 OpenStack 服务
 	OpenstackSDConfigs []*openstack.SDConfig `yaml:"openstack_sd_configs,omitempty"`
 	// List of Azure service discovery configurations.
+	// 发现 Azuer 服务
 	AzureSDConfigs []*azure.SDConfig `yaml:"azure_sd_configs,omitempty"`
 	// List of Triton service discovery configurations.
+	// 从 Container Monitor 中发现服务
 	TritonSDConfigs []*triton.SDConfig `yaml:"triton_sd_configs,omitempty"`
 }
 

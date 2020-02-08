@@ -18,6 +18,9 @@ type Group struct {
 //
 // The first actor (function) to return interrupts all running actors.
 // The error is passed to the interrupt functions, and is returned by Run.
+//
+// Add 通过该方法将各服务组件的启动入口添加到 actors 中
+// execute 方法为所对应服务组件的启动入口方法; interrupt 方法在组件退出时被调用, 通常用于资源释放
 func (g *Group) Add(execute func() error, interrupt func(error)) {
 	g.actors = append(g.actors, actor{execute, interrupt})
 }
@@ -32,6 +35,7 @@ func (g *Group) Run() error {
 	}
 
 	// Run each actor.
+	// 启动所有的 actor
 	errors := make(chan error, len(g.actors))
 	for _, a := range g.actors {
 		go func(a actor) {
@@ -39,14 +43,17 @@ func (g *Group) Run() error {
 		}(a)
 	}
 
+	// 等待第 1 个 actor 停止
 	// Wait for the first actor to stop.
 	err := <-errors
 
+	// 向所有 actor 发送停止信号
 	// Signal all actors to stop.
 	for _, a := range g.actors {
 		a.interrupt(err)
 	}
 
+	// 等待所有的 actor 停止
 	// Wait for all actors to stop.
 	for i := 1; i < cap(errors); i++ {
 		<-errors
