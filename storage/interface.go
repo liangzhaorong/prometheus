@@ -65,12 +65,16 @@ type Queryable interface {
 }
 
 // Querier provides querying access over time series data of a fixed time range.
+//
+// Querier 监控数据的查询接口.
 type Querier interface {
 	LabelQuerier
 
 	// Select returns a set of series that matches the given label matchers.
 	// Caller can specify if it requires returned series to be sorted. Prefer not requiring sorting for better performance.
 	// It allows passing hints that can help in optimising select, but it's up to implementation how this is used if used at all.
+	//
+	// 根据标签查询对应的时序数据.
 	Select(sortSeries bool, hints *SelectHints, matchers ...*labels.Matcher) SeriesSet
 }
 
@@ -134,6 +138,8 @@ func (f QueryableFunc) Querier(ctx context.Context, mint, maxt int64) (Querier, 
 // It must be completed with a call to Commit or Rollback and must not be reused afterwards.
 //
 // Operations on the Appender interface are not goroutine-safe.
+//
+// Appender 是用于适配远端存储的数据写入接口
 type Appender interface {
 	// Add adds a sample pair for the given series. A reference number is
 	// returned which can be used to add further samples in the same or later
@@ -142,20 +148,31 @@ type Appender interface {
 	// to AddFast() at any point. Adding the sample via Add() returns a new
 	// reference number.
 	// If the reference is 0 it must not be used for caching.
+	//
+	// Add 方法用于将给定的样本数据添加到对应的序列中, 并返回索引.
+	// 请求参数主要是采样时间 t 和样本值 v.
+	// Add 方法需要根据传入的标签 l 通过 Hash 算法找到(如果不存在则创建)序列 ID,
+	// 然后将样本值保存到序列中.
 	Add(l labels.Labels, t int64, v float64) (uint64, error)
 
 	// AddFast adds a sample pair for the referenced series. It is generally
 	// faster than adding a sample by providing its full label set.
+	//
+	// AddFast 通过给定的索引（即 ref 序列 ID）快速添加指标.
 	AddFast(ref uint64, t int64, v float64) error
 
 	// Commit submits the collected samples and purges the batch. If Commit
 	// returns a non-nil error, it also rolls back all modifications made in
 	// the appender so far, as Rollback would do. In any case, an Appender
 	// must not be used anymore after Commit has been called.
+	//
+	// 用于提交多个 Add 方法或将 AddFast 方法的结果持久化（如保存到 WAL 中）
 	Commit() error
 
 	// Rollback rolls back all modifications made in the appender so far.
 	// Appender has to be discarded after rollback.
+	//
+	// 回滚
 	Rollback() error
 }
 

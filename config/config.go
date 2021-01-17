@@ -641,11 +641,17 @@ type MetadataConfig struct {
 }
 
 // RemoteReadConfig is the configuration for reading from remote storage.
+// RemoteReadConfig 用于从远端存储中读取数据时的请求配置
 type RemoteReadConfig struct {
 	URL           *config.URL    `yaml:"url"`
 	RemoteTimeout model.Duration `yaml:"remote_timeout,omitempty"`
-	ReadRecent    bool           `yaml:"read_recent,omitempty"`
-	Name          string         `yaml:"name,omitempty"`
+	// 通过 fanout 写入时序数据时, 首先会执行 primary（本地存储）写入, 然后遍历写入每个远端存储.
+	// 针对查询数据时, 在远端存储 read 接口里有一个 read_recent 参数, 该参数用于就近读取数据, 如果
+	// 将其设置为 false, 则表示 Prometheus 在对远端存储查询之前先用本地存储中最老数据的时间戳与查询
+	// 最老数据的时间戳进行比较, 若发现需要查询的数据在本地存储中, 则会跳过对远端存储的查询; 如果不
+	// 全在本地存储中, 则将远端存储查询的最大时间修改成本地存储的最大时间, 避免重复查询.
+	ReadRecent bool   `yaml:"read_recent,omitempty"`
+	Name       string `yaml:"name,omitempty"`
 
 	// We cannot do proper Go type embedding below as the parser will then parse
 	// values arbitrarily into the overflow maps of further-down types.

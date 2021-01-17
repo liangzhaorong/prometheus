@@ -24,11 +24,16 @@ import (
 	tsdb_errors "github.com/prometheus/prometheus/tsdb/errors"
 )
 
+// fanout 用于兼容本地存储和远端存储. 该接口同样实现对远端存储进行数据写入的 Appender 接口.
+// 当执行 fanout 中的方法（如 Add）时, fanout 接口会先执行本地存储（primary）的 Add 方法,
+// 然后遍历执行每个远端存储（secondaries）的 Add 方法. 当需要获取 Prometheus 保存时间最长
+// 的监控数据时, 也会分别调用本地存储和远端存储的 startTime 方法, 获取各自的最长保存时间点,
+// 选择最大值作为整个存储的最长保存时间.
 type fanout struct {
 	logger log.Logger
 
-	primary     Storage
-	secondaries []Storage
+	primary     Storage   // 本地存储
+	secondaries []Storage // 多个远端存储
 }
 
 // NewFanout returns a new fanout Storage, which proxies reads and writes
@@ -144,11 +149,13 @@ type fanoutAppender struct {
 }
 
 func (f *fanoutAppender) Add(l labels.Labels, t int64, v float64) (uint64, error) {
+	// 执行 primary（本地存储）写入
 	ref, err := f.primary.Add(l, t, v)
 	if err != nil {
 		return ref, err
 	}
 
+	// 然后遍历写入每个远端存储
 	for _, appender := range f.secondaries {
 		if _, err := appender.Add(l, t, v); err != nil {
 			return 0, err

@@ -57,20 +57,24 @@ message ReadRequest {
 }
 
 // ReadResponse is a response when response_type equals SAMPLES.
+// 读返回参数
 message ReadResponse {
   // In same order as the request's queries.
   repeated QueryResult results = 1;
 }
 
+// 请求参数
 message Query {
-  int64 start_timestamp_ms = 1;
-  int64 end_timestamp_ms = 2;
-  repeated prometheus.LabelMatcher matchers = 3;
+  int64 start_timestamp_ms = 1;                  // 监控数据查询的开始时间
+  int64 end_timestamp_ms = 2;                    // 监控数据查询的结束时间
+  repeated prometheus.LabelMatcher matchers = 3; // 匹配的标签. 这里的 repeated 表示可添加多个标签的条件筛选
   prometheus.ReadHints hints = 4;
 }
 
+// 查询结果
 message QueryResult {
   // Samples within a time series must be ordered by time.
+  // TimeSeries 时间序列主要包含这个序列的标签和样本数据, 样本数据以 "时间戳: 样本值" 格式传输
   repeated prometheus.TimeSeries timeseries = 1;
 }
 
