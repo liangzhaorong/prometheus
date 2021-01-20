@@ -39,6 +39,7 @@ var (
 )
 
 // WriteStorage represents all the remote write storage.
+// WriteStorage 代表所有的远端写存储
 type WriteStorage struct {
 	logger log.Logger
 	reg    prometheus.Registerer
@@ -50,7 +51,7 @@ type WriteStorage struct {
 	walDir            string
 	queues            map[string]*QueueManager
 	samplesIn         *ewmaRate
-	flushDeadline     time.Duration
+	flushDeadline     time.Duration // 刷新时间戳
 	interner          *pool
 	scraper           ReadyScrapeManager
 

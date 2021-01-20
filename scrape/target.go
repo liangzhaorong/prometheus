@@ -283,6 +283,7 @@ func (ts Targets) Swap(i, j int)      { ts[i], ts[j] = ts[j], ts[i] }
 var errSampleLimit = errors.New("sample limit exceeded")
 
 // limitAppender limits the number of total appended samples in a batch.
+// limitAppender 是 Appender 接口的装饰器, 用于限制每次批量写入的点的个数
 type limitAppender struct {
 	storage.Appender
 
@@ -315,6 +316,7 @@ func (app *limitAppender) AddFast(ref uint64, t int64, v float64) error {
 	return err
 }
 
+// timeLimitAppender 是 Appender 接口的装饰器, 用于检测写入时序点的 timestamp 是否合法
 type timeLimitAppender struct {
 	storage.Appender
 
@@ -322,10 +324,12 @@ type timeLimitAppender struct {
 }
 
 func (app *timeLimitAppender) Add(lset labels.Labels, t int64, v float64) (uint64, error) {
+	// 检测写入时序点的 timestamp 是否合法
 	if t > app.maxTime {
 		return 0, storage.ErrOutOfBounds
 	}
 
+	// 若时序点的 timestamp 合法, 则调用底层 Appender 实例完成写入
 	ref, err := app.Appender.Add(lset, t, v)
 	if err != nil {
 		return 0, err

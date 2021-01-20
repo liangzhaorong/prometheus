@@ -50,6 +50,7 @@ type startTimeCallback func() (int64, error)
 
 // Storage represents all the remote read and write endpoints.  It implements
 // storage.Storage.
+// Storage 是 Prometheus Server 对所有远程存储读写的抽象
 type Storage struct {
 	logger log.Logger
 	mtx    sync.Mutex
@@ -57,8 +58,9 @@ type Storage struct {
 	rws *WriteStorage
 
 	// For reads.
+	// 该字段中每个元素项实例都对应一个远端存储
 	queryables             []storage.SampleAndChunkQueryable
-	localStartTimeCallback startTimeCallback
+	localStartTimeCallback startTimeCallback // 该字段实际指向了 Ready Storage.StartTime() 方法, 用于获取本地所存储的最小时间戳
 }
 
 // NewStorage returns a remote.Storage.

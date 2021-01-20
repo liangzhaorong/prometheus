@@ -177,6 +177,7 @@ type Appender interface {
 }
 
 // SeriesSet contains a set of series.
+// SeriesSet 用来抽象一组时序集合
 type SeriesSet interface {
 	Next() bool
 	// At returns full series. Returned series should be iteratable even after Next is called.
@@ -232,6 +233,7 @@ func ErrChunkSeriesSet(err error) ChunkSeriesSet {
 }
 
 // Series exposes a single time series and allows iterating over samples.
+// Series 表示一条时序
 type Series interface {
 	Labels
 	SampleIteratable
@@ -259,6 +261,7 @@ type ChunkSeries interface {
 // Labels represents an item that has labels e.g. time series.
 type Labels interface {
 	// Labels returns the complete set of labels. For series it means all labels identifying the series.
+	// 返回该时序的 Label 集合, 该 Label 集合唯一标识该时序
 	Labels() labels.Labels
 }
 

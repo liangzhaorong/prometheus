@@ -75,17 +75,21 @@ type Appender interface {
 // Iterator iterates over the samples of a time series, in timestamp-increasing order.
 type Iterator interface {
 	// Next advances the iterator by one.
+	// 推测后续是否还存在可迭代的点
 	Next() bool
 	// Seek advances the iterator forward to the first sample with the timestamp equal or greater than t.
 	// If current sample found by previous `Next` or `Seek` operation already has this property, Seek has no effect.
 	// Seek returns true, if such sample exists, false otherwise.
 	// Iterator is exhausted when the Seek returns false.
+	// 将当前迭代器快速推进到指定时间戳的位置
 	Seek(t int64) bool
 	// At returns the current timestamp/value pair.
 	// Before the iterator has advanced At behaviour is unspecified.
+	// 返回当前迭代的点
 	At() (int64, float64)
 	// Err returns the current error. It should be used only after iterator is
 	// exhausted, that is `Next` or `Seek` returns false.
+	// 返回迭代过程中发生的异常
 	Err() error
 }
 

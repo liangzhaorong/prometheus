@@ -32,7 +32,7 @@ import (
 type fanout struct {
 	logger log.Logger
 
-	primary     Storage   // 本地存储
+	primary     Storage   // 本地存储, 实际是 ReadyStorage 实例
 	secondaries []Storage // 多个远端存储
 }
 
@@ -118,13 +118,15 @@ func (f *fanout) ChunkQuerier(ctx context.Context, mint, maxt int64) (ChunkQueri
 	return NewMergeChunkQuerier([]ChunkQuerier{primary}, secondaries, NewCompactingChunkSeriesMerger(ChainedSeriesMerge)), nil
 }
 
+// Appender 将本地存储关联的 Appender 实例以及远端存储关联的 Appender 封装成 fanoutAppender 实例并返回.
 func (f *fanout) Appender(ctx context.Context) Appender {
-	primary := f.primary.Appender(ctx)
+	primary := f.primary.Appender(ctx) // 获取本地存储关联的 Appender 实例
 	secondaries := make([]Appender, 0, len(f.secondaries))
+	// 获取远端存储关联的 Appender 实例
 	for _, storage := range f.secondaries {
 		secondaries = append(secondaries, storage.Appender(ctx))
 	}
-	return &fanoutAppender{
+	return &fanoutAppender{ // 将本地 Appender 和远端 Appender 封装成 fanoutAppender
 		logger:      f.logger,
 		primary:     primary,
 		secondaries: secondaries,
@@ -144,18 +146,18 @@ func (f *fanout) Close() error {
 type fanoutAppender struct {
 	logger log.Logger
 
-	primary     Appender
-	secondaries []Appender
+	primary     Appender   // 本地存储关联的 Appender
+	secondaries []Appender // 远端存储关联的 Appender
 }
 
 func (f *fanoutAppender) Add(l labels.Labels, t int64, v float64) (uint64, error) {
-	// 执行 primary（本地存储）写入
+	// 将时序点写入本地存储
 	ref, err := f.primary.Add(l, t, v)
 	if err != nil {
 		return ref, err
 	}
 
-	// 然后遍历写入每个远端存储
+	// 将时序点写入全部远端存储
 	for _, appender := range f.secondaries {
 		if _, err := appender.Add(l, t, v); err != nil {
 			return 0, err
